@@ -158,3 +158,39 @@ Niche means small. That is what the word means.
 | separator | `<|endoftext|>` at id 0 | no |
 | dtype on disk | uint16 | yes, but no reason to |
 | mixed precision | fp16 + GradScaler | yes |
+
+---
+
+## Operational lessons (learned the hard way)
+
+**Kaggle has two filesystems with completely different lifetimes.**
+
+| path | lifetime |
+|---|---|
+| `/kaggle/working` | **dies with the session.** Interactive scratch space only |
+| `/kaggle/input/...` | read-only, persists, attached from a dataset or notebook output |
+
+**Quick Save is not Save & Run All.** Quick Save persists notebook code and rendered
+cell output. It does *not* re-execute the notebook and does *not* snapshot
+`/kaggle/working`. Only a completed Save & Run All (Commit) produces version output
+files. Using Quick Save and then losing the session destroyed 477M tokens of work
+and cost a 30-minute re-run.
+
+**Hugging Face usernames are case-sensitive and unrelated to GitHub.** GitHub
+`EuclidStellar` vs HF `euclidstellar` produced:
+
+```
+403 Forbidden: You don't have the rights to create a dataset
+under the namespace "EuclidStellar"
+```
+
+Which reads like a permissions problem and is not. Derive the namespace instead of
+typing it: `repo = f"{api.whoami()['name']}/name"`.
+
+**Conclusion: the source of truth should not be Kaggle.** Data now lives at
+`euclidstellar/tinystories-bpe4096` on HF Hub, reachable from Kaggle, Colab, or
+locally with `hf_hub_download`. Kaggle became pure compute.
+
+**Determinism check passed.** The re-run produced 477,236,558 tokens — identical to
+the first run, to the token. Same corpus + same BPE config gives the same tokenizer
+and the same stream.
