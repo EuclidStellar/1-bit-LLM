@@ -45,10 +45,11 @@ bigram structure survives a 320-dimensional factorization.
 | 0 | uniform | — | 8.3178 | — |
 | 1 | unigram | token frequencies | 6.0380 | −2.2798 |
 | 2 | embedding + tied head | lookup only | **5.3828** | −0.6552 |
-| 3 | + 1 attention layer | q,k,v,o + causal mask | _todo_ | |
-| 4 | + FFN | up, ReLU², down | _todo_ | |
-| 5 | + RoPE | rotary positions | _todo_ | |
-| 6 | 8 layers | depth, pre-norm, residuals | _todo_ | |
+| 3 | + 1 attention layer | q,k,v,o + causal mask | **3.9106** | −1.4722 |
+| 4 | + FFN | up, ReLU², down | **3.7150** | −0.1956 |
+| 5 | + RoPE | rotary positions | **3.2948** | −0.4202 |
+| 6 | + norms | RMSNorm pre-norm + SubLN | _todo_ | |
+| 7 | 8 layers | depth | _todo_ | |
 
 ## Shared harness
 
@@ -102,3 +103,94 @@ how much it has seen. This is the correct state to be in before adding
 attention: any improvement at rung 3 is attributable to capability, not to
 more data.
 
+
+
+### The parameter economics are wildly uneven
+
+| rung | added | params added | nats bought | **nats per million params** |
+|---|---|---|---|---|
+| 2 | embedding | 1,310,720 | 0.6552 | 0.50 |
+| 3 | attention | 409,600 | 1.4722 | **3.59** |
+| 4 | FFN | 819,200 | 0.1956 | 0.24 |
+| 5 | RoPE | **0** | 0.4202 | **infinite** |
+
+Share of all model gain (measured from the unigram floor of 6.0380):
+
+```
+attention  53.7%     embedding  23.9%     RoPE  15.3%     FFN  7.1%
+```
+
+**Attention is 63% of the gain for 16% of the parameters.** It is ~15x more
+parameter-efficient than the FFN at depth 1. **RoPE delivered more than twice
+the FFN's gain for zero parameters** and only 4% more wall clock (145s vs 139s).
+
+Caveat before generalizing: this is one layer, so the FFN has nothing composed
+to process yet, and there is no normalization — ReLU squared is unusually
+scale-sensitive because squaring amplifies. Both handicaps are tested at
+rungs 6 and 7.
+
+Rung 5 at 3.2948 is the first rung below the bigram bound of 3.6140.
+
+### Position encoding, isolated with a synthetic task
+
+Task: `target[t] = input[t-2]`, alphabet of 8, iid tokens. The current token
+carries **zero** information about the target, so a context-free model is pinned
+at `ln(8) = 2.0794` and memorization is impossible.
+
+| rung | context available | loss | effective choices | trajectory |
+|---|---|---|---|---|
+| 2 | none | 2.0665 | 7.9 | flat at 2.07 from step 100 |
+| 3 | unordered | 1.5458 | 4.7 | 2.14 -> 1.55, grinding |
+| 5 | **ordered** | **0.0144** | **1.01** | 0.64 -> 0.03 -> 0.01, solved |
+
+The rung 3 result corrected a wrong prediction. I expected attention without
+position encoding to stay at the floor; it beat it by 0.53 nats. **The bag of
+words is itself informative** — the target token is a *member* of the prefix
+multiset, so knowing which tokens appear (and how often) shifts the posterior
+even without knowing where any of them are.
+
+### RoPE's relative-position property, verified
+
+Same content vectors, same offset of 3, absolute positions spanning 100x:
+
+```
+q at   5, k at   2:  -9.889071
+q at  50, k at  47:  -9.889072
+q at 200, k at 197:  -9.889067
+q at 500, k at 497:  -9.889047
+```
+
+Identical to six significant figures. The drift in the final digits is fp32
+rotation error accumulating with position.
+
+### One line of gradient clipping was the difference between 8.0065 and 0.0144
+
+My side-test helper omitted `clip_grad_norm_` while the main harness had it.
+Rung 5 on the copy task:
+
+```
+without clipping, lr 1e-2:  8.0065     <- ln(4096) = 8.3178, total collapse
+with    clipping, lr 1e-2:  0.0144     <- solved
+```
+
+Same learning rate. Same everything else. The lr sweep proves it was not the
+learning rate — rung 5 gives 0.0144 at 1e-2, 3e-3, and 1e-3 alike once clipped.
+
+Which rungs collapsed is diagnostic: **rung 3 (no FFN) survived; rung 5 (ReLU²
+FFN, no norms) exploded.** Squaring amplifies, and nothing was holding the
+residual stream's scale. Direct evidence for the normalization hypothesis before
+rung 6 was even run.
+
+Two harness defects, both mine:
+1. no gradient clipping in the side-test helper
+2. returning only the final loss, which makes divergence indistinguishable from
+   "learned poorly"
+
+Fix for (2): always print the loss trajectory. A single number hides explosions.
+
+Contrast the two failure modes the lr sweep separates:
+
+```
+rung 3:  1.5793 / 1.5458 / 1.6046  across 10x lr   -> CAPABILITY-limited
+rung 5:  8.0065 without clipping, 0.0144 with      -> OPTIMIZATION-limited
+```
