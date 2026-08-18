@@ -44,12 +44,61 @@ bigram structure survives a 320-dimensional factorization.
 |---|---|---|---|---|
 | 0 | uniform | — | 8.3178 | — |
 | 1 | unigram | token frequencies | 6.0380 | −2.2798 |
-| 2 | embedding + tied head | lookup only | _todo_ | |
+| 2 | embedding + tied head | lookup only | **5.3828** | −0.6552 |
 | 3 | + 1 attention layer | q,k,v,o + causal mask | _todo_ | |
 | 4 | + FFN | up, ReLU², down | _todo_ | |
 | 5 | + RoPE | rotary positions | _todo_ | |
 | 6 | 8 layers | depth, pre-norm, residuals | _todo_ | |
 
+## Shared harness
+
+Identical for every rung — the model is the only variable.
+
+```
+20M tokens (2,441 steps x batch 32 x ctx 256)
+AdamW lr 1e-3, betas (0.9, 0.95), wd 0.1, grad clip 1.0
+100-step linear warmup then cosine decay to 10%
+seed 1337, val loss averaged over 60 batches of held-out val.bin
+```
+
+`lr` is fixed across rungs deliberately. Each rung's number is therefore
+"under shared hyperparameters", not "at its own optimum" — tuning per rung
+would make the ladder a comparison of tuning rather than of architecture.
+
 ## Findings
 
-_(to be filled as rungs complete)_
+### Rung 2 — a rank-320 factorization captures ~27% of bigram structure
+
+```
+val loss 5.3828   ppl 217.6   1,310,720 params   54s on a T4
+```
+
+| | cross-entropy | effective choices |
+|---|---|---|
+| unigram | 6.0380 | 419 |
+| **rung 2** | **5.3828** | **218** |
+| full bigram table | 3.6140 | 37 |
+
+```
+available gain, unigram -> bigram :  6.0380 - 3.6140 = 2.4240 nats
+rung 2 captured                   :  6.0380 - 5.3828 = 0.6552 nats  = 27%
+```
+
+A 4096x4096 bigram table (16.8M params) squeezed into 4096x320 (1.31M params,
+12.8x smaller) retains roughly a quarter of the conditional information. The
+bigram bound is optimistic — measured on training data with only 3.0% of
+possible bigrams observed — so 27% is a floor.
+
+### Rung 2 is architecture-limited, not data-limited
+
+```
+final train loss 5.3708
+val loss         5.3828      gap 0.012
+```
+
+Essentially no overfitting at 15 tokens/param. The model has extracted
+everything a context-free predictor can and is bounded by what it *is*, not by
+how much it has seen. This is the correct state to be in before adding
+attention: any improvement at rung 3 is attributable to capability, not to
+more data.
+
