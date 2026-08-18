@@ -48,8 +48,8 @@ bigram structure survives a 320-dimensional factorization.
 | 3 | + 1 attention layer | q,k,v,o + causal mask | **3.9106** | −1.4722 |
 | 4 | + FFN | up, ReLU², down | **3.7150** | −0.1956 |
 | 5 | + RoPE | rotary positions | **3.2948** | −0.4202 |
-| 6 | + norms | RMSNorm pre-norm + SubLN | _todo_ | |
-| 7 | 8 layers | depth | _todo_ | |
+| 6 | + norms | RMSNorm pre-norm + SubLN | **2.4304** | −0.8644 |
+| 7 | 8 layers | depth | **2.0651** | −0.3653 |
 
 ## Shared harness
 
@@ -194,3 +194,102 @@ Contrast the two failure modes the lr sweep separates:
 rung 3:  1.5793 / 1.5458 / 1.6046  across 10x lr   -> CAPABILITY-limited
 rung 5:  8.0065 without clipping, 0.0144 with      -> OPTIMIZATION-limited
 ```
+
+
+### Rung 6 — normalization is the efficiency champion, and it REPLACED part of the FFN
+
+```
+rung 5 -> rung 6:  3.2948 -> 2.4304   (+0.8644 nats)   for 2,560 params
+```
+
+Five RMSNorm layers, 0.1% of the model, second-largest gain on the ladder.
+**94x more parameter-efficient than attention, 1,400x more than the FFN.**
+
+The hypothesis going in was that normalization would *unlock* the FFN, since
+ReLU squared is scale-sensitive. It did the opposite:
+
+```
+FFN without norms (rung 3 -> 4)        : +0.1956 nats
+FFN with    norms (r6noFFN -> rung 6)  : +0.1175 nats     40% SMALLER
+```
+
+Better explanation than the hypothesis: **part of what an unnormalized FFN buys
+is scale correction, not computation.** With no norms the FFN learns to rescale a
+drifting residual stream, and some of its +0.1956 was that janitorial work. Add
+2,560 dedicated normalization parameters and that job is done better and far
+cheaper, so the FFN's *remaining* marginal contribution shrinks.
+
+Norms did not help the FFN. Norms replaced part of it.
+
+Also: 163s with the FFN vs 108s without — **the FFN is 34% of wall clock for
+5.4% of the gain.**
+
+(Bookkeeping defect: `Rung6NoFFN` inherits `up`/`down` and never calls them, so
+it printed 2,542,080 params when it effectively has 1,722,880. The loss
+comparison is unaffected — unused params get no gradient and `set_to_none=True`
+makes `opt.step()` skip them.)
+
+### Rung 7 — the full architecture, 11,159,360 params exactly
+
+```
+val loss 2.0651   ppl 7.9   820s   causality max delta 0.00e+00
+0.737 bits per character  (2.0651 nats/token / 4.04 chars/token / ln 2)
+```
+
+Parameter count matches the design arithmetic by construction: `vocab*d +
+12*d^2*L + norms` = `1,310,720 + 9,830,400 + 18,240`.
+
+## The headline result of the ladder
+
+| rung | added | params added | nats | nats per million params |
+|---|---|---|---|---|
+| 2 | embedding | 1,310,720 | 0.6552 | 0.50 |
+| 3 | attention | 409,600 | 1.4722 | 3.59 |
+| 4 | FFN | 819,200 | 0.1956 | 0.24 |
+| 5 | RoPE | 0 | 0.4202 | infinite |
+| 6 | norms | 2,560 | 0.8644 | **337.7** |
+| 7 | 7 more layers | 8,617,280 | 0.3653 | **0.042** |
+
+Share of all model gain, measured from the unigram floor of 6.0380:
+
+```
+attention 37.1%   norms 21.8%   embedding 16.5%   RoPE 10.6%   depth 9.2%   FFN 4.9%
+```
+
+```
+attention + norms + RoPE  =    412,160 params ( 3.7%)  ->  69.5% of gain
+FFN + depth               =  9,436,480 params (84.6%)  ->  14.1% of gain
+```
+
+**3.7% of the parameters delivered 70% of the gain.**
+
+### The caveat that keeps this honest
+
+```
+20,000,000 tokens / 11,159,360 params = 1.79 tokens per parameter
+Chinchilla-optimal                    = ~20         -> 11x under-trained
+```
+
+And no overfitting whatsoever at that ratio (train 2.0512 vs val 2.0651, gap
+0.014), which means the model has not even fit the training data — it is
+starved, not oversized. Depth and FFN capacity are exactly the components that
+need data to pay off.
+
+So the correct claim is: **at this data budget**, structural components
+(attention, normalization, position) dominate capacity components (depth, FFN).
+That is a statement about the regime, and it predicts that depth's share should
+grow at the real run's 100M-token budget. Checkable later.
+
+### On comparing losses across tokenizers
+
+Cross-entropy per token is not comparable between tokenizers — a smaller
+vocabulary mechanically produces lower loss. The TinyStories paper's ~2.17
+reference used a 10,240-token vocab, so our 2.0651 at 4,096 is **not** a
+like-for-like comparison. Use bits per character instead:
+
+```
+2.0651 nats/token / 4.04 chars/token / ln(2) = 0.737 bits/char
+```
+
+Both arms in Phase 3 share this tokenizer, so nats/token is fine *within* the
+project. Only cross-project comparisons need the normalized figure.
