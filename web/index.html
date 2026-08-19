@@ -303,7 +303,9 @@ async function generate() {
   }
   cur.remove();
   const dt = (performance.now() - t0) / 1000;
-  setStatus(`${gen.length} tokens in ${dt.toFixed(2)}s = ${(gen.length/dt).toFixed(1)} tok/s `
+  const tps = gen.length / dt;
+  setStatus(`${gen.length} tokens in ${dt.toFixed(2)}s = ${tps.toFixed(1)} tok/s `
+          + `= ${(tps * LM.macsPerToken() / 1e9).toFixed(2)} GMAC/s `
           + `(plain JavaScript, single thread)`, "ok");
   running = false; $("go").disabled = false; $("stop").disabled = true;
 }

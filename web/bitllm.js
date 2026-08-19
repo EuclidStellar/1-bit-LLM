@@ -108,10 +108,12 @@ function actQuant(x, out, bits = 8) {
   return out;
 }
 
-// y[o] = sum_i x[i] * W[o*inF + i].  Zeros are skipped: 31% of ternary weights
-// are exactly zero, so this is genuinely add / subtract / skip -- the branch
-// costs less than the multiply it replaces.
-function ternaryMatmul(x, W, states, scale, outF, inF, y) {
+// Reference implementation: literal add / subtract / skip, no multiplication by
+// any weight. Correct, and SLOW in JavaScript -- with 31% zeros and ~34.5% each
+// of +/-1 the branch is essentially unpredictable, so the CPU mispredicts on
+// roughly two thirds of 11 million iterations per token. Kept because it is the
+// honest expression of what ternary weights mean; not used in the hot path.
+export function ternaryMatmulReference(x, states, scale, outF, inF, y) {
   for (let o = 0; o < outF; o++) {
     const base = o * inF;
     let acc = 0;
@@ -125,13 +127,26 @@ function ternaryMatmul(x, W, states, scale, outF, inF, y) {
   return y;
 }
 
-function denseMatmul(x, W, outF, inF, y) {
-  for (let o = 0; o < outF; o++) {
-    const base = o * inF;
-    let acc = 0;
-    for (let i = 0; i < inF; i++) acc += x[i] * W[base + i];
-    y[o] = acc;
+// Four independent accumulators. One `acc` serializes on the add's latency;
+// four let the pipeline overlap them, which is worth more than it looks.
+function dot4(x, W, base, inF) {
+  let a0 = 0, a1 = 0, a2 = 0, a3 = 0, i = 0;
+  const lim = inF - 3;
+  for (; i < lim; i += 4) {
+    a0 += x[i]     * W[base + i];
+    a1 += x[i + 1] * W[base + i + 1];
+    a2 += x[i + 2] * W[base + i + 2];
+    a3 += x[i + 3] * W[base + i + 3];
   }
+  let acc = a0 + a1 + a2 + a3;
+  for (; i < inF; i++) acc += x[i] * W[base + i];
+  return acc;
+}
+
+// Hot path: the pre-scaled Float32Array of states*scale, dense and branchless.
+// Numerically identical to the reference above, several times faster.
+function denseMatmul(x, W, outF, inF, y) {
+  for (let o = 0; o < outF; o++) y[o] = dot4(x, W, o * inF, inF);
   return y;
 }
 
@@ -184,7 +199,13 @@ export class BitLM {
   _bit(name, x, outF, inF, y) {
     const t = this.T[name];
     actQuant(x, this.xq.subarray(0, inF), this.actBits);
-    return ternaryMatmul(this.xq, t.data, t.states, t.scale, outF, inF, y);
+    return denseMatmul(this.xq, t.data, outF, inF, y);
+  }
+
+  /** MACs per generated token, for reporting an honest throughput figure. */
+  macsPerToken() {
+    const D = this.d, F = this.ffn;
+    return this.nLayer * (4 * D * D + 2 * D * F) + D * this.vocab;
   }
 
   _rope(vec, p) {
