@@ -71,9 +71,12 @@
   button.ghost{background:transparent;color:var(--ink);border:1px solid var(--rule)}
   button:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
 
+  #live{font-family:var(--mono);font-size:.78rem;color:var(--accent);
+        margin:0 0 .5rem;min-height:1.1em;font-variant-numeric:tabular-nums}
   #out{font-family:var(--serif);font-size:1.04rem;line-height:1.62;white-space:pre-wrap;
-       min-height:11rem;background:var(--surface);border:1px solid var(--rule);
-       padding:1.1rem 1.2rem;margin:0}
+       height:22rem;overflow-y:auto;background:var(--surface);
+       border:1px solid var(--rule);padding:1.1rem 1.2rem;margin:0;
+       scroll-behavior:auto}
   #out .cursor{display:inline-block;width:.5em;height:1.05em;background:var(--accent);
                vertical-align:-.16em;animation:bl 1s step-end infinite}
   @keyframes bl{50%{opacity:0}}
@@ -158,6 +161,7 @@ server, no API key, no round trip.</p>
   <div id="proftab" style="margin-top:1rem"></div>
 </div>
 
+<div id="live"></div>
 <div id="out"></div>
 
 <section>
@@ -370,52 +374,59 @@ async function generate() {
   let logits = null;
   for (const id of ids) logits = LM.forward(id);
 
+  // Terminal-tail rendering: append text nodes and keep the box pinned to the
+  // bottom. Reassigning textContent re-rendered the entire string on every
+  // paint, which at 4096 tokens costs more than the model does.
   const el = $("out");
-  let text = prompt;
-  el.textContent = text;
+  el.textContent = "";
+  el.appendChild(document.createTextNode(prompt));
   const cur = document.createElement("span");
-  cur.className = "cursor"; el.appendChild(cur);
+  cur.className = "cursor";
+  el.appendChild(cur);
+  const live = $("live");
 
   let count = 0, steadyCount = 0, steadyMs = 0, steadyT0 = 0;
+  let pending = "";
   const t0 = performance.now();
-  let lastPaint = t0;
+  const frame = () => new Promise(r => requestAnimationFrame(r));
 
   for (let i = 0; i < n && !stopFlag; i++) {
     if (alpha > 0) {
-      // O(window) with running counts, not a Map rebuilt every token
       const w = Math.min(SMP.n, SMP.window);
       for (let j = 0; j < w; j++) {
         const tk = SMP.ring[j];
         logits[tk] -= alpha * SMP.counts[tk];
       }
     }
-    // apply bans in place; spreading a Set into a fresh array every token was
-    // ~4,000 allocations per 4096-token run for no reason
     if (banEot) logits[eot] = -Infinity;
     const nb = ngN > 0 ? SMP.bannedNext() : null;
     if (nb) for (const b of nb) logits[b] = -Infinity;
+
     const next = sample(logits, temp, topk, rng, null);
     SMP.push(next);
     count++;
+    pending += (next === eot) ? SEP : TOK.decode([next]);
 
-    // incremental render -- decoding the whole history every token is O(n^2)
-    // and at 4096 tokens would cost more than the inference itself
-    text += (next === eot) ? SEP : TOK.decode([next]);
-
-    const now = performance.now();
-    if (now - lastPaint > 40 || i === n - 1) {
-      el.textContent = text; el.appendChild(cur);
-      $("sTps").textContent = (count / ((now - t0) / 1000)).toFixed(0);
-      lastPaint = now;
-      await new Promise(r => setTimeout(r, 0));
+    // one paint per animation frame -- ~17 tokens at 1000 tok/s, which reads as
+    // a stream rather than the lurch of a 40 ms interval
+    if (pending.length && (i % 4 === 3 || i === n - 1)) {
+      el.insertBefore(document.createTextNode(pending), cur);
+      pending = "";
+      el.scrollTop = el.scrollHeight;                 // pin to the bottom
+      const secs = (performance.now() - t0) / 1000;
+      const tps = count / secs;
+      live.textContent = `${count} tokens · ${tps.toFixed(0)} tok/s · ${secs.toFixed(1)}s`;
+      $("sTps").textContent = tps.toFixed(0);
+      await frame();
     }
-    // start the steady-state clock once the ring is full
+
     if (steadyT0 === 0 && LM.contextUsed >= LM.cap) steadyT0 = performance.now();
-    logits = LM.forward(next);      // ring buffer: no re-prefill, ever
+    logits = LM.forward(next);
     if (steadyT0 > 0) { steadyCount++; steadyMs = performance.now() - steadyT0; }
   }
 
-  el.textContent = text; cur.remove();
+  if (pending.length) el.insertBefore(document.createTextNode(pending), cur);
+  cur.remove();
   const dt = (performance.now() - t0) / 1000;
   const tps = count / dt;
   const engine = (LM === WLM) ? (KNAME.includes("relaxed") ? "WASM+relaxedSIMD"
