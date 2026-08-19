@@ -1,0 +1,17 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "bitllm"
+version = "0.1.0"
+description = "An 11M-parameter BitNet b1.58 language model, built from scratch"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = ["torch>=2.4", "numpy>=1.26", "tokenizers>=0.20"]
+
+[project.urls]
+Homepage = "https://github.com/EuclidStellar/1-bit-LLM"
+
+[tool.setuptools]
+packages = ["bitllm"]

@@ -1,0 +1,6 @@
+torch
+numpy
+tokenizers
+huggingface_hub
+gradio
+git+https://github.com/EuclidStellar/1-bit-LLM.git
