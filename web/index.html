@@ -223,22 +223,39 @@ async function boot() {
 
     // ---- verify against the PyTorch reference --------------------------
     setStatus("verifying against PyTorch reference...");
-    let verdict = "";
     try {
       const ref = await (await fetch(HF + "reference.json")).json();
       LM.reset();
+      const mine = [];
       let last = null;
-      for (const id of ref.input_ids) last = LM.forward(id);
-      let mx = 0;
-      for (let i = 0; i < last.length; i++)
-        mx = Math.max(mx, Math.abs(last[i] - ref.logits_last[i]));
-      const rel = mx / Math.max(...ref.logits_last.map(Math.abs));
-      verdict = mx < 0.05
-        ? `verified: max logit deviation ${mx.toExponential(2)} (${(rel*100).toFixed(3)}% relative)`
-        : `MISMATCH: max logit deviation ${mx.toExponential(2)} -- the JS forward pass is wrong`;
-      setStatus(verdict, mx < 0.05 ? "ok" : "bad");
-    } catch {
-      setStatus("ready (reference.json not published, so unverified)", "");
+      for (const id of ref.input_ids) {
+        last = LM.forward(id);
+        let bi = 0;
+        for (let i = 1; i < last.length; i++) if (last[i] > last[bi]) bi = i;
+        mine.push(bi);
+      }
+      // Argmax agreement is the meaningful test. Max absolute logit deviation is
+      // NOT: the int8 activation quantizer is a step function, so a 1e-9 input
+      // difference flips a whole quantization level. Two PyTorch models with
+      // bit-identical ternary weights measured 0.178 max deviation for exactly
+      // this reason. JS computes in fp64 and stores fp32; PyTorch is fp32.
+      const n = ref.argmax_per_pos.length;
+      let agree = 0;
+      for (let i = 0; i < n; i++) if (mine[i] === ref.argmax_per_pos[i]) agree++;
+      let mx = 0, sum = 0;
+      for (let i = 0; i < last.length; i++) {
+        const d = Math.abs(last[i] - ref.logits_last[i]);
+        if (d > mx) mx = d;
+        sum += d;
+      }
+      const mean = sum / last.length;
+      const ok = agree === n;
+      setStatus(`${ok ? "verified" : "MISMATCH"}: argmax agrees at ${agree}/${n} `
+              + `positions | logit deviation max ${mx.toExponential(2)}, `
+              + `mean ${mean.toExponential(2)}`, ok ? "ok" : "bad");
+      if (!ok) console.warn("reference argmax", ref.argmax_per_pos, "ours", mine);
+    } catch (e) {
+      setStatus("ready (reference not loaded: " + e.message + ")", "");
     }
 
     const names = MODEL.header.tensors.filter(t => t.kind === "ternary").map(t => t.name);
