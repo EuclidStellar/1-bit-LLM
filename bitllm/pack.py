@@ -77,6 +77,39 @@ def unpack_base3(packed: np.ndarray, n: int) -> np.ndarray:
 # file format
 # --------------------------------------------------------------------------
 
+def _is_quantized_bitlinear(mod):
+    """Duck-typed check, deliberately NOT isinstance().
+
+    isinstance() compares class *identity*, and re-importing bitllm after
+    `del sys.modules[...]` creates a brand-new BitLinear class object. A model
+    built before the reload holds instances of the old one, so isinstance
+    returns False for every module -- silently. That bug stored 9,830,400 body
+    weights as fp16 instead of packing them, producing a 19.97 MB file instead
+    of 2.27 MB with no error at all.
+    """
+    return (hasattr(mod, "weight")
+            and getattr(mod, "weight_mode", "none") not in (None, "none"))
+
+
+def inference_config(train_config):
+    """Config for a model that CONSUMES packed weights.
+
+    The packed file already holds quantized weights, so the inference model must
+    NOT quantize again: `weight_mode` and `embed_mode` become "none" while
+    `act_bits` is preserved, because activation quantization happens at runtime
+    and is part of the computation the QAT model was trained with.
+
+    Re-quantizing an already-ternary tensor leaves the states unchanged but
+    recomputes the scale as mean(|states*g|) = g*(1 - zero_fraction) ~ 0.686g,
+    shrinking every weight by ~31%.
+    """
+    c = dict(train_config)
+    c["weight_mode"] = "none"
+    c["embed_mode"] = "none"
+    c.setdefault("act_bits", 8)
+    return c
+
+
 def save_packed(model, path, config=None, meta=None):
     """Write a self-describing packed model.
 
@@ -86,13 +119,13 @@ def save_packed(model, path, config=None, meta=None):
     the normalization vectors, and the embedding if it was not trained ternary
     -- stores fp16.
     """
-    from .model import BitLinear
-
     tensors, blobs, offset = [], [], 0
     quantized_names = set()
     for name, mod in model.named_modules():
-        if isinstance(mod, BitLinear) and mod.is_quantized:
+        if _is_quantized_bitlinear(mod):
             quantized_names.add(name + ".weight")
+    assert quantized_names, ("no quantized modules found -- refusing to write a "
+                            "file that claims to be packed but is not")
     if getattr(model, "embed_mode", "none") == "ternary":
         quantized_names.add("embed.weight")
 
@@ -113,8 +146,14 @@ def save_packed(model, path, config=None, meta=None):
         blobs.append(raw)
         offset += len(raw)
 
-    header = json.dumps({"tensors": tensors, "config": config or {},
-                         "meta": meta or {}, "tied_head": True}).encode()
+    n_tern = sum(t["n"] for t in tensors if t["kind"] == "ternary")
+    n_fp16 = sum(t["nbytes"] // 2 for t in tensors if t["kind"] == "fp16")
+    header = json.dumps({"tensors": tensors,
+                         "config": config or {},
+                         "inference_config": inference_config(config or {}),
+                         "meta": meta or {}, "tied_head": True,
+                         "counts": {"ternary_weights": n_tern,
+                                    "fp16_weights": n_fp16}}).encode()
     with open(path, "wb") as f:
         f.write(MAGIC)
         f.write(struct.pack("<I", len(header)))
@@ -122,7 +161,12 @@ def save_packed(model, path, config=None, meta=None):
         for b in blobs:
             f.write(b)
     return {"path": path, "header_bytes": len(header) + 12,
-            "blob_bytes": offset, "total_bytes": len(header) + 12 + offset}
+            "blob_bytes": offset, "total_bytes": len(header) + 12 + offset,
+            "ternary_weights": n_tern, "fp16_weights": n_fp16,
+            "packed_tensors": len(quantized_names),
+            "bits_per_ternary_weight": round(
+                sum(t["nbytes"] for t in tensors if t["kind"] == "ternary")
+                * 8 / max(n_tern, 1), 4)}
 
 
 def load_packed(path):
@@ -232,3 +276,23 @@ def selftest(verbose=True):
 if __name__ == "__main__":
     print("bitllm.pack selftest:")
     print("PASS" if selftest() else "FAIL")
+
+
+def load_packed_model(path, device="cpu"):
+    """Load a packed file into a model that does NOT re-quantize.
+
+    Returns (model, header). The result computes bit-identically to the QAT
+    model the file was written from, because the packed weights already ARE the
+    quantized weights.
+    """
+    from .model import LM
+
+    sd, header = load_packed(path)
+    cfg = header.get("inference_config")
+    if cfg is None:                      # files written before this existed
+        cfg = inference_config(header.get("config", {}))
+    cfg = {k: v for k, v in cfg.items() if k in LM.__init__.__code__.co_varnames}
+    m = LM(**cfg).to(device)
+    m.load_state_dict({k: v.to(device) for k, v in sd.items()})
+    m.eval()
+    return m, header
