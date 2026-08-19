@@ -79,6 +79,77 @@ QAT on the embedding recovered **76%** of what post-hoc quantization cost
 (0.5596 → 0.1347 nats). In blind reading, the ternary-embedding output is not
 reliably distinguishable from the fp16-embedding output.
 
+## Sample output
+
+Same prompt, same seed, four arms. Only quantization differs.
+
+**fp32 control** — ppl 7.8
+
+> Once upon a time there was a rabbit named Jack. He was walking through the
+> woods when he spotted a mysterious machine. It was a metal machine with a shiny
+> bell on it. He was so excited to see what was inside. Jack walked closer to the
+> machine and was curious. He touched the machine and carefully opened it. He was
+> so happy to see the machine. **He pulled the machine through the machine** and
+> it made a loud noise. **He put the machine on the machine and ran around the
+> machine.**
+
+Grammar is perfect. It gets *stuck* — eight uses of "machine".
+
+**QAT-ternary + ternary embedding (this model)** — ppl 10.1
+
+> Once upon a time there was a rabbit named Jack. Jack was very kind and loved to
+> explore all the new landscape. One day Jack saw a shiny thing in the sky. He
+> wanted to find out what was inside. Jack flew through the woods and saw a group
+> of people. He was so excited that he started to run and jump in the grass. The
+> birds were so pretty that Jack went over to them. "Hi there you!" said the
+> birds. Jack smiled and said, "But we don't want to join in all the time before
+> it's time to go home." The birds listened to Jack's advice and they played
+> until the sun set.
+
+Grammar, dialogue punctuation and attribution, story arc, and a proper ending all
+hold. **A rabbit flies.** Referents drift rather than repeat.
+
+**QAT-ternary, fp16 embedding** — ppl 8.8
+
+> ...One day, Jack was walking in the forest when he saw a big, mean frog. He
+> picked up a stick, and he wanted to touch it. Suddenly, a brave rabbit hopped
+> up and landed next to **the bird**. **Jack tried to catch the rabbit**, but it
+> led him away.
+
+Frog becomes bird; Jack, who is a rabbit, chases a rabbit. **Not reliably
+distinguishable from the ternary-embedding output in a blind read**, despite
+being 2x larger — which is why the ternary embedding is worth its 0.1347 nats.
+
+**PTQ-ternary** — ppl 151.9, quantized *after* training
+
+> Once upon a time, there was a cute frog. He had a kind face, and he wanted to
+> rest. **He Bob nodded, a painter**, and said, " "No, but he started playing and
+> yawn. " before he heard inside he wanted a normal around. He replied, he said
+> he said, but **he wasn scared.** ", who was coming why lived now he asked you,
+> but **he wouldn shook.**
+
+Broken, and the *way* it breaks is diagnostic. **Contractions fracture** —
+`wasn`, `wouldn` lose their `'t`. That is a two-token dependency where the second
+token is almost fully determined by the first, and post-training quantization
+cannot hold even that. Stray single-letter tokens appear (`L.`, `The N!`). It
+produces *English-shaped* noise: local word order stays plausible, which is why
+it scores 151.9 rather than the 4096 of uniform guessing.
+
+### Degradation is bottom-up
+
+| property | fp32 | QAT | QAT+t.embed | PTQ |
+|---|---|---|---|---|
+| grammatical sentences | yes | yes | yes | **broken** |
+| story has an ending | yes | yes | yes | no |
+| dialogue punctuation & attribution | yes | yes | yes | unbalanced |
+| dialogue makes sense | yes | wobbly | contradictory | none |
+| **entity consistency** | **already failing** | worse | worst | absent |
+| invented non-words | none | none | rare | pervasive |
+
+Grammar is the most robust property in the model; entity tracking is the most
+fragile, and it fails in **every** arm including full precision. Quantization is
+not the cause — the training budget is.
+
 ## Limitations — read these
 
 **It is not a good model.** It is a rigorous demonstration.
