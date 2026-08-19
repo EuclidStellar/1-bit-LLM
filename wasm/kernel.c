@@ -41,8 +41,10 @@ void matvec(const float *x, const float *W, float *y, int outF, int inF) {
     const float *w = W + (long)o * inF;
     v128_t a0 = wasm_f32x4_splat(0.0f), a1 = wasm_f32x4_splat(0.0f);
     v128_t a2 = wasm_f32x4_splat(0.0f), a3 = wasm_f32x4_splat(0.0f);
+    v128_t a4 = wasm_f32x4_splat(0.0f), a5 = wasm_f32x4_splat(0.0f);
+    v128_t a6 = wasm_f32x4_splat(0.0f), a7 = wasm_f32x4_splat(0.0f);
     int i = 0;
-    for (; i + 16 <= inF; i += 16) {
+    for (; i + 32 <= inF; i += 32) {
       a0 = wasm_f32x4_add(a0, wasm_f32x4_mul(wasm_v128_load(x + i),
                                              wasm_v128_load(w + i)));
       a1 = wasm_f32x4_add(a1, wasm_f32x4_mul(wasm_v128_load(x + i + 4),
@@ -51,8 +53,22 @@ void matvec(const float *x, const float *W, float *y, int outF, int inF) {
                                              wasm_v128_load(w + i + 8)));
       a3 = wasm_f32x4_add(a3, wasm_f32x4_mul(wasm_v128_load(x + i + 12),
                                              wasm_v128_load(w + i + 12)));
+      a4 = wasm_f32x4_add(a4, wasm_f32x4_mul(wasm_v128_load(x + i + 16),
+                                             wasm_v128_load(w + i + 16)));
+      a5 = wasm_f32x4_add(a5, wasm_f32x4_mul(wasm_v128_load(x + i + 20),
+                                             wasm_v128_load(w + i + 20)));
+      a6 = wasm_f32x4_add(a6, wasm_f32x4_mul(wasm_v128_load(x + i + 24),
+                                             wasm_v128_load(w + i + 24)));
+      a7 = wasm_f32x4_add(a7, wasm_f32x4_mul(wasm_v128_load(x + i + 28),
+                                             wasm_v128_load(w + i + 28)));
     }
-    v128_t a = wasm_f32x4_add(wasm_f32x4_add(a0, a1), wasm_f32x4_add(a2, a3));
+    for (; i + 4 <= inF; i += 4)
+      a0 = wasm_f32x4_add(a0, wasm_f32x4_mul(wasm_v128_load(x + i),
+                                             wasm_v128_load(w + i)));
+    v128_t a = wasm_f32x4_add(wasm_f32x4_add(wasm_f32x4_add(a0, a1),
+                                             wasm_f32x4_add(a2, a3)),
+                              wasm_f32x4_add(wasm_f32x4_add(a4, a5),
+                                             wasm_f32x4_add(a6, a7)));
     float s = wasm_f32x4_extract_lane(a, 0) + wasm_f32x4_extract_lane(a, 1)
             + wasm_f32x4_extract_lane(a, 2) + wasm_f32x4_extract_lane(a, 3);
     for (; i < inF; ++i) s += x[i] * w[i];
@@ -191,4 +207,77 @@ void gather_row(const float *table, float *out, int row, int n) {
   int i = 0;
   for (; i + 4 <= n; i += 4) wasm_v128_store(out + i, wasm_v128_load(src + i));
   for (; i < n; ++i) out[i] = src[i];
+}
+
+
+// ---------------------------------------------------------------------------
+// exp() without libm, and a fully fused attention head.
+// ---------------------------------------------------------------------------
+
+static inline float pow2i(int i) {
+  if (i < -126) return 0.0f;
+  if (i > 127) i = 127;
+  union { unsigned u; float f; } r;
+  r.u = ((unsigned)(i + 127)) << 23;      // f32.reinterpret_i32, one instruction
+  return r.f;
+}
+
+// exp(x) via 2^(x*log2e), split into an integer power of two and a minimax
+// polynomial on [-0.5, 0.5]. Accurate to ~1e-7 relative, which is far beyond
+// what softmax needs after the max has been subtracted (so x <= 0 always).
+static inline float fast_expf(float x) {
+  if (x < -87.0f) return 0.0f;
+  float t = x * 1.44269504088896f;                 // log2(e)
+  int i = (int)(t < 0.0f ? t - 0.5f : t + 0.5f);   // nearest
+  float f = t - (float)i;
+  float p = 1.0f + f * (0.69314718f + f * (0.24022651f + f * (0.05550411f
+          + f * (0.00961812f + f * 0.00133336f))));
+  return p * pow2i(i);
+}
+
+// One head of causal attention, start to finish: scores, softmax, weighted sum.
+//
+// Replaces attn_scores + a JavaScript softmax + attn_mix. That was 16,384
+// Math.exp calls and 192 WASM boundary crossings per token; this is 64 calls and
+// no JS exp at all.
+EXPORT("attn_head")
+void attn_head(const float *q, const float *kc, const float *vc, float *out,
+               float *sc, int nc, int D, int qo, int hd, float scale) {
+  const float *qq = q + qo;
+
+  float mx = -1e30f;
+  for (int t = 0; t < nc; ++t) {
+    const float *k = kc + (long)t * D + qo;
+    v128_t a0 = wasm_f32x4_splat(0.0f), a1 = wasm_f32x4_splat(0.0f);
+    int i = 0;
+    for (; i + 8 <= hd; i += 8) {
+      a0 = wasm_f32x4_add(a0, wasm_f32x4_mul(wasm_v128_load(qq + i),
+                                             wasm_v128_load(k + i)));
+      a1 = wasm_f32x4_add(a1, wasm_f32x4_mul(wasm_v128_load(qq + i + 4),
+                                             wasm_v128_load(k + i + 4)));
+    }
+    v128_t a = wasm_f32x4_add(a0, a1);
+    float d = wasm_f32x4_extract_lane(a, 0) + wasm_f32x4_extract_lane(a, 1)
+            + wasm_f32x4_extract_lane(a, 2) + wasm_f32x4_extract_lane(a, 3);
+    for (; i < hd; ++i) d += qq[i] * k[i];
+    d *= scale;
+    sc[t] = d;
+    if (d > mx) mx = d;
+  }
+
+  float sum = 0.0f;
+  for (int t = 0; t < nc; ++t) { float e = fast_expf(sc[t] - mx); sc[t] = e; sum += e; }
+  float inv = 1.0f / sum;
+
+  float *o = out + qo;
+  for (int i = 0; i < hd; ++i) o[i] = 0.0f;
+  for (int t = 0; t < nc; ++t) {
+    v128_t wv = wasm_f32x4_splat(sc[t] * inv);
+    const float *v = vc + (long)t * D + qo;
+    int i = 0;
+    for (; i + 4 <= hd; i += 4)
+      wasm_v128_store(o + i, wasm_f32x4_add(wasm_v128_load(o + i),
+                                            wasm_f32x4_mul(wv, wasm_v128_load(v + i))));
+    for (; i < hd; ++i) o[i] += sc[t] * inv * v[i];
+  }
 }

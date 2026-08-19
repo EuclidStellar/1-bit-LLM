@@ -16,8 +16,8 @@ export async function loadKernel(url, heap) {
   const { instance } = await WebAssembly.instantiate(bytes,
     { env: { memory: heap.memory } });
 
-  const need = ["matvec", "rmsnorm", "act_quant", "attn_scores",
-                "attn_mix", "add_inplace", "relu2", "gather_row"];
+  const need = ["matvec", "rmsnorm", "act_quant", "add_inplace",
+                "relu2", "gather_row"];
   const missing = need.filter(n => typeof instance.exports[n] !== "function");
   if (missing.length) throw new Error("kernel missing exports: " + missing);
 
@@ -87,13 +87,19 @@ export class WasmBitLM {
          + this.d * this.vocab;
   }
 
-  _rope(vec, p) {
-    const half = this.hd / 2, H = this.nHead, hd = this.hd;
+  /** RoPE angles depend only on the position, which is fixed for the whole
+   *  token -- so compute them once per forward, not once per layer. */
+  _ropeTables(p) {
+    const half = this.hd / 2;
     for (let i = 0; i < half; i++) {
       const th = p * this.invFreq[i];
       this.rc[i] = Math.cos(th);
       this.rs[i] = Math.sin(th);
     }
+  }
+
+  _rope(vec) {
+    const half = this.hd / 2, H = this.nHead, hd = this.hd;
     for (let hh = 0; hh < H; hh++) {
       const b = hh * hd;
       for (let i = 0; i < half; i++) {
@@ -114,6 +120,8 @@ export class WasmBitLM {
     const p = this.pos, slot = p % this.cap;
 
     K.gather_row(P(O["embed.weight"]), P(this.oX), tokenId, D);
+    this._ropeTables(p);
+    const hasFused = typeof K.attn_head === "function";
 
     for (let l = 0; l < this.nLayer; l++) {
       const B = "blocks." + l + ".";
@@ -125,8 +133,8 @@ export class WasmBitLM {
       K.matvec(P(this.oQD), P(O[B + "k.weight"]), P(this.oK), D, D);
       K.matvec(P(this.oQD), P(O[B + "v.weight"]), P(this.oV), D, D);
 
-      this._rope(this.vQ, p);
-      this._rope(this.vK, p);              // rotated at its ABSOLUTE position
+      this._rope(this.vQ);
+      this._rope(this.vK);                 // rotated at its ABSOLUTE position
       this.f32.copyWithin(this.oKC[l] + slot * D, this.oK, this.oK + D);
       this.f32.copyWithin(this.oVC[l] + slot * D, this.oV, this.oV + D);
 
@@ -137,18 +145,24 @@ export class WasmBitLM {
       const scale = 1 / Math.sqrt(hd);
       for (let hh = 0; hh < H; hh++) {
         const qo = hh * hd;
-        K.attn_scores(P(this.oQ), P(this.oKC[l]), P(this.oSc),
-                      nc, D, qo, hd, scale);
-        let mx = -Infinity;
-        for (let t = 0; t < nc; t++) if (this.vSc[t] > mx) mx = this.vSc[t];
-        let sum = 0;
-        for (let t = 0; t < nc; t++) {
-          const e = Math.exp(this.vSc[t] - mx);
-          this.vSc[t] = e; sum += e;
+        if (hasFused) {
+          // scores + softmax + weighted sum in one call, no JS exp
+          K.attn_head(P(this.oQ), P(this.oKC[l]), P(this.oVC[l]), P(this.oAtt),
+                      P(this.oSc), nc, D, qo, hd, scale);
+        } else {
+          K.attn_scores(P(this.oQ), P(this.oKC[l]), P(this.oSc),
+                        nc, D, qo, hd, scale);
+          let mx = -Infinity;
+          for (let t = 0; t < nc; t++) if (this.vSc[t] > mx) mx = this.vSc[t];
+          let sum = 0;
+          for (let t = 0; t < nc; t++) {
+            const e = Math.exp(this.vSc[t] - mx);
+            this.vSc[t] = e; sum += e;
+          }
+          const inv = 1 / sum;
+          for (let t = 0; t < nc; t++) this.vSc[t] *= inv;
+          K.attn_mix(P(this.oSc), P(this.oVC[l]), P(this.oAtt), nc, D, qo, hd);
         }
-        const inv = 1 / sum;
-        for (let t = 0; t < nc; t++) this.vSc[t] *= inv;
-        K.attn_mix(P(this.oSc), P(this.oVC[l]), P(this.oAtt), nc, D, qo, hd);
       }
 
       K.rmsnorm(P(this.oAtt), P(O[B + "subln.weight"]), P(this.oY), D, 1e-6);
