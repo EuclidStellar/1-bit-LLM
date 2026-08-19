@@ -133,6 +133,11 @@ server, no API key, no round trip.</p>
       <input type="range" id="topk" min="0" max="400" step="10" value="100"></div>
     <div><label for="seed">Seed</label>
       <input type="number" id="seed" value="0"></div>
+    <div><label for="single">Story mode</label>
+      <select id="single">
+        <option value="1" selected>one continuous story</option>
+        <option value="0">let it start new stories</option>
+      </select></div>
   </div>
   <div style="display:flex;gap:.6rem;flex-wrap:wrap">
     <button id="go" disabled>Generate</button>
@@ -153,12 +158,15 @@ server, no API key, no round trip.</p>
   cost, not maximizing quality.</p>
   <p>It knows no facts, cannot answer questions, and has never seen anything
   outside simple narrative English.</p>
-  <p><strong>Its context is 256 tokens.</strong> Ask for 4096 and it will not
-  write one long story &mdash; it writes fifteen or twenty short ones, because
-  every 192 tokens it forgets all but the last 64 and starts again. It also emits
-  an end-of-story marker on its own, shown below as
-  <code>&middot; &middot; &middot;</code>. Talking forever while remembering
-  nothing is, in fairness, on brand.</p>
+  <p><strong>Its attention window is 256 tokens</strong> &mdash; what it was
+  trained with. Generation past that uses a ring buffer: the oldest token is
+  dropped as each new one arrives, and because rotary position embeddings encode
+  only the <em>relative</em> distance between tokens, absolute position can run to
+  4,000 while every offset stays inside the trained range. Nothing is recomputed.</p>
+  <p>So it never stops, but it only ever remembers the last 256 tokens. Ask for
+  4,096 and it will keep going &mdash; drifting, forgetting who anyone was, and
+  quietly contradicting itself. Talking forever while remembering nothing is, in
+  fairness, on brand.</p>
 </section>
 
 <section>
@@ -287,22 +295,20 @@ async function generate() {
 
   const prompt = $("prompt").value;
   const n = +$("nnew").value, temp = +$("temp").value, topk = +$("topk").value;
+  const single = $("single").value === "1";
   const rng = mulberry(+$("seed").value | 0);
   const ids = TOK.encode(prompt);
   const eot = TOK.eotId;
 
-  // The model's context is 256 tokens -- that is what it was trained with. To
-  // generate past that we slide: when the cache fills, keep the most recent
-  // KEEP tokens and re-prefill them. Simple and provably correct, at the cost
-  // of KEEP forwards per (maxT - KEEP) generated tokens. RoPE re-rotation would
-  // be cheaper and much easier to get subtly wrong.
-  const KEEP = 64;
+  // In "one continuous story" mode the end-of-story token is banned outright.
+  // The model learned to emit it and then open a fresh story, which is why
+  // long generations used to come out as a pile of separate stories.
+  const banned = (single && eot >= 0) ? [eot] : null;
   const SEP = "\n\n\u00b7 \u00b7 \u00b7\n\n";
 
   LM.reset();
-  const ctx = [];
   let logits = null;
-  for (const id of ids) { logits = LM.forward(id); ctx.push(id); }
+  for (const id of ids) logits = LM.forward(id);
 
   const el = $("out");
   let text = prompt;
@@ -310,45 +316,35 @@ async function generate() {
   const cur = document.createElement("span");
   cur.className = "cursor"; el.appendChild(cur);
 
-  let count = 0, slides = 0, prefills = 0;
+  let count = 0;
   const t0 = performance.now();
   let lastPaint = t0;
 
   for (let i = 0; i < n && !stopFlag; i++) {
-    const next = sample(logits, temp, topk, rng);
-    ctx.push(next); count++;
+    const next = sample(logits, temp, topk, rng, banned);
+    count++;
 
-    // incremental render -- decoding the whole history each token would be
-    // O(n^2) and at 4096 tokens that dominates the actual inference
+    // incremental render -- decoding the whole history every token is O(n^2)
+    // and at 4096 tokens would cost more than the inference itself
     text += (next === eot) ? SEP : TOK.decode([next]);
 
     const now = performance.now();
     if (now - lastPaint > 40 || i === n - 1) {
       el.textContent = text; el.appendChild(cur);
-      const tps = count / ((now - t0) / 1000);
-      $("sTps").textContent = tps.toFixed(0);
+      $("sTps").textContent = (count / ((now - t0) / 1000)).toFixed(0);
       lastPaint = now;
-      await new Promise(r => setTimeout(r, 0));       // let the UI paint
+      await new Promise(r => setTimeout(r, 0));
     }
-
-    if (LM.pos >= LM.maxT) {                          // slide the window
-      const keep = ctx.slice(-KEEP);
-      LM.reset();
-      for (const id of keep) logits = LM.forward(id);
-      slides++; prefills += keep.length;
-    } else {
-      logits = LM.forward(next);
-    }
+    logits = LM.forward(next);      // ring buffer: no re-prefill, ever
   }
 
   el.textContent = text; cur.remove();
   const dt = (performance.now() - t0) / 1000;
   const tps = count / dt;
-  const gmacs = tps * LM.macsPerToken() / 1e9;
   setStatus(`${count} tokens in ${dt.toFixed(2)}s = ${tps.toFixed(0)} tok/s `
-          + `= ${gmacs.toFixed(2)} GMAC/s | ${slides} context slides, `
-          + `${prefills} re-prefill forwards (${(prefills/Math.max(count,1)*100).toFixed(0)}% overhead) `
-          + `| plain JavaScript, single thread`, "ok");
+          + `= ${(tps * LM.macsPerToken() / 1e9).toFixed(2)} GMAC/s | `
+          + `context window ${LM.contextUsed}/${LM.cap} tokens, absolute position `
+          + `${LM.pos} | plain JavaScript, single thread`, "ok");
   running = false; $("go").disabled = false; $("stop").disabled = true;
 }
 
