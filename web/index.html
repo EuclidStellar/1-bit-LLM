@@ -138,6 +138,15 @@ server, no API key, no round trip.</p>
         <option value="1" selected>one continuous story</option>
         <option value="0">let it start new stories</option>
       </select></div>
+    <div><label for="freq">Repetition penalty <span class="m" id="vFreq">0.6</span></label>
+      <input type="range" id="freq" min="0" max="2" step="0.1" value="0.6"></div>
+    <div><label for="ngram">Block repeated</label>
+      <select id="ngram">
+        <option value="0">off</option>
+        <option value="3" selected>3-grams</option>
+        <option value="4">4-grams</option>
+        <option value="5">5-grams</option>
+      </select></div>
   </div>
   <div style="display:flex;gap:.6rem;flex-wrap:wrap">
     <button id="go" disabled>Generate</button>
@@ -163,6 +172,11 @@ server, no API key, no round trip.</p>
   dropped as each new one arrives, and because rotary position embeddings encode
   only the <em>relative</em> distance between tokens, absolute position can run to
   4,000 while every offset stays inside the trained range. Nothing is recomputed.</p>
+  <p>Left alone past its natural ending it degenerates into
+  <em>&ldquo;The end. The end. The end.&rdquo;</em> &mdash; it was trained on
+  stories of about 227 tokens and has no concept of a longer one. Blocking
+  repeated n-grams makes looping impossible, so it is forced to keep finding
+  something new to say. That is why the output rambles rather than repeats.</p>
   <p>So it never stops, but it only ever remembers the last 256 tokens. Ask for
   4,096 and it will keep going &mdash; drifting, forgetting who anyone was, and
   quietly contradicting itself. Talking forever while remembering nothing is, in
@@ -200,7 +214,8 @@ server, no API key, no round trip.</p>
 </div>
 
 <script type="module">
-import { loadModel, BitLM, sample } from "./bitllm.js";
+import { loadModel, BitLM, sample, NoRepeatNGram, frequencyPenalty }
+  from "./bitllm.js";
 import { Tokenizer } from "./tokenizer.js";
 
 const HF = "https://huggingface.co/euclidstellar/tinystories-1bit-llm/resolve/main/";
@@ -221,6 +236,7 @@ function mulberry(a) {
 }
 
 for (const [r, out, f] of [["temp","vTemp",v=>(+v).toFixed(2)],
+                           ["freq","vFreq",v=>(+v).toFixed(1)],
                            ["topk","vTopk",v=>v],["rows","vRows",v=>v],["cols","vCols",v=>v]])
   $(r).addEventListener("input", e => $(out).textContent = f(e.target.value));
 
@@ -303,7 +319,12 @@ async function generate() {
   // In "one continuous story" mode the end-of-story token is banned outright.
   // The model learned to emit it and then open a fresh story, which is why
   // long generations used to come out as a pile of separate stories.
-  const banned = (single && eot >= 0) ? [eot] : null;
+  const banEot = (single && eot >= 0) ? [eot] : null;
+  const alpha = +$("freq").value;
+  const ngN = +$("ngram").value;
+  const ng = ngN > 0 ? new NoRepeatNGram(ngN) : null;
+  const hist = [];
+  for (const id of ids) { hist.push(id); if (ng) ng.push(id); }
   const SEP = "\n\n\u00b7 \u00b7 \u00b7\n\n";
 
   LM.reset();
@@ -321,7 +342,15 @@ async function generate() {
   let lastPaint = t0;
 
   for (let i = 0; i < n && !stopFlag; i++) {
-    const next = sample(logits, temp, topk, rng, banned);
+    frequencyPenalty(logits, hist, alpha);
+    let ban = banEot;
+    if (ng) {
+      const b = ng.banned();
+      if (b && b.size) ban = banEot ? [...banEot, ...b] : [...b];
+    }
+    const next = sample(logits, temp, topk, rng, ban);
+    hist.push(next);
+    if (ng) ng.push(next);
     count++;
 
     // incremental render -- decoding the whole history every token is O(n^2)

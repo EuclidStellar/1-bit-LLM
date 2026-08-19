@@ -315,6 +315,49 @@ export class BitLM {
   }
 }
 
+// ---------- repetition control ----------------------------------------------
+
+/**
+ * Blocks any token that would complete an n-gram already seen.
+ *
+ * Necessary because this model was trained on ~227-token stories and has no
+ * concept of a longer one. Forced past its natural ending it degenerates into
+ * "The end. The end. The end." -- banning the end-of-story token does not make
+ * it write more, it makes it unable to stop. This makes looping impossible, so
+ * it has to keep finding something new to say.
+ */
+export class NoRepeatNGram {
+  constructor(n = 3) { this.n = n; this.seen = new Map(); this.hist = []; }
+
+  _key(arr, from) { return arr.slice(from, from + this.n - 1).join(","); }
+
+  banned() {
+    if (this.hist.length < this.n - 1) return null;
+    const k = this._key(this.hist, this.hist.length - (this.n - 1));
+    return this.seen.get(k) || null;
+  }
+
+  push(tok) {
+    this.hist.push(tok);
+    if (this.hist.length >= this.n) {
+      const k = this._key(this.hist, this.hist.length - this.n);
+      let set = this.seen.get(k);
+      if (!set) { set = new Set(); this.seen.set(k, set); }
+      set.add(tok);
+    }
+  }
+}
+
+/** Frequency penalty over a sliding window of recent tokens. */
+export function frequencyPenalty(logits, hist, alpha, window = 128) {
+  if (alpha <= 0) return;
+  const from = Math.max(0, hist.length - window);
+  const count = new Map();
+  for (let i = from; i < hist.length; i++)
+    count.set(hist[i], (count.get(hist[i]) || 0) + 1);
+  for (const [t, c] of count) logits[t] -= alpha * c;
+}
+
 // ---------- sampling --------------------------------------------------------
 export function sample(logits, temperature = 0.8, topK = 100, rng = Math.random,
                        banned = null) {
