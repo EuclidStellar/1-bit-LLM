@@ -26,7 +26,9 @@ export async function loadKernel(url, heap) {
   const hb = instance.exports.__heap_base;
   heap.setBase(typeof hb === "object" ? hb.value : hb);
 
-  return { K: instance.exports, size: bytes.byteLength };
+  return { K: instance.exports, size: bytes.byteLength,
+           caps: { i8: typeof instance.exports.matvec_i8 === "function",
+                   fusedAttn: typeof instance.exports.attn_head === "function" } };
 }
 
 export class WasmBitLM {
@@ -38,6 +40,16 @@ export class WasmBitLM {
   constructor(model, heap, K, cfg) {
     const c = model.header.inference_config || model.header.config || {};
     this.heap = heap; this.K = K; this.O = model.offsets;
+    this.I = model.i8offsets || {};
+    this.SC = {};
+    for (const tt of model.header.tensors)
+      if (tt.kind === "ternary") this.SC[tt.name] = tt.scale;
+    this.SC["head.weight"] = this.SC["embed.weight"];
+    // int8 states are a quarter of the bytes of the dense f32 copy, and weight
+    // streaming is the bottleneck at this size
+    this.useI8 = typeof K.matvec_i8 === "function"
+              && Object.keys(this.I).length > 0;
+    this.fused = typeof K.attn_head === "function";
     this.vocab = c.vocab ?? 4096;
     this.d = c.d ?? 320;
     this.nLayer = c.n_layer ?? 8;
@@ -111,17 +123,27 @@ export class WasmBitLM {
     }
   }
 
-  /** ptr helper */
-  _p(off) { return off * 4; }
+  /** One matvec, from int8 states when the kernel supports it. */
+  _mv(name, srcOff, dstOff, outF, inF) {
+    if (this.useI8)
+      this.K.matvec_i8(srcOff * 4, this.I[name], dstOff * 4, outF, inF,
+                       this.SC[name]);
+    else
+      this.K.matvec(srcOff * 4, this.O[name] * 4, dstOff * 4, outF, inF);
+  }
 
   forward(tokenId) {
     const K = this.K, O = this.O, P = o => o * 4;
     const D = this.d, H = this.nHead, hd = this.hd, F = this.ffn;
     const p = this.pos, slot = p % this.cap;
 
-    K.gather_row(P(O["embed.weight"]), P(this.oX), tokenId, D);
+    if (this.useI8 && typeof K.gather_row_i8 === "function")
+      K.gather_row_i8(this.I["embed.weight"], P(this.oX), tokenId, D,
+                      this.SC["embed.weight"]);
+    else
+      K.gather_row(P(O["embed.weight"]), P(this.oX), tokenId, D);
     this._ropeTables(p);
-    const hasFused = typeof K.attn_head === "function";
+    const hasFused = this.fused;
 
     for (let l = 0; l < this.nLayer; l++) {
       const B = "blocks." + l + ".";
@@ -129,9 +151,9 @@ export class WasmBitLM {
       K.rmsnorm(P(this.oX), P(O[B + "attn_norm.weight"]), P(this.oH), D, 1e-6);
 
       K.act_quant(P(this.oH), P(this.oQD), D);
-      K.matvec(P(this.oQD), P(O[B + "q.weight"]), P(this.oQ), D, D);
-      K.matvec(P(this.oQD), P(O[B + "k.weight"]), P(this.oK), D, D);
-      K.matvec(P(this.oQD), P(O[B + "v.weight"]), P(this.oV), D, D);
+      this._mv(B + "q.weight", this.oQD, this.oQ, D, D);
+      this._mv(B + "k.weight", this.oQD, this.oK, D, D);
+      this._mv(B + "v.weight", this.oQD, this.oV, D, D);
 
       this._rope(this.vQ);
       this._rope(this.vK);                 // rotated at its ABSOLUTE position
@@ -167,22 +189,22 @@ export class WasmBitLM {
 
       K.rmsnorm(P(this.oAtt), P(O[B + "subln.weight"]), P(this.oY), D, 1e-6);
       K.act_quant(P(this.oY), P(this.oQD), D);
-      K.matvec(P(this.oQD), P(O[B + "o.weight"]), P(this.oAtt), D, D);
+      this._mv(B + "o.weight", this.oQD, this.oAtt, D, D);
       K.add_inplace(P(this.oX), P(this.oAtt), D);
 
       K.rmsnorm(P(this.oX), P(O[B + "ffn_norm.weight"]), P(this.oH), D, 1e-6);
       K.act_quant(P(this.oH), P(this.oQD), D);
-      K.matvec(P(this.oQD), P(O[B + "up.weight"]), P(this.oU), F, D);
+      this._mv(B + "up.weight", this.oQD, this.oU, F, D);
       K.relu2(P(this.oU), F);
       K.rmsnorm(P(this.oU), P(O[B + "ffn_subln.weight"]), P(this.oUn), F, 1e-6);
       K.act_quant(P(this.oUn), P(this.oQF), F);
-      K.matvec(P(this.oQF), P(O[B + "down.weight"]), P(this.oY), D, F);
+      this._mv(B + "down.weight", this.oQF, this.oY, D, F);
       K.add_inplace(P(this.oX), P(this.oY), D);
     }
 
     K.rmsnorm(P(this.oX), P(O["final_norm.weight"]), P(this.oH), D, 1e-6);
     // tied head is a plain nn.Linear in PyTorch: no activation quantization
-    K.matvec(P(this.oH), P(O["embed.weight"]), P(this.oLog), this.vocab, D);
+    this._mv("embed.weight", this.oH, this.oLog, this.vocab, D);
 
     this.pos++;
     this.nCached = Math.min(this.pos, this.cap);

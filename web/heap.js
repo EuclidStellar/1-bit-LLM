@@ -43,6 +43,15 @@ export class Heap {
     return off;
   }
 
+  /** Allocate n bytes (for int8 weight states), returned as a byte offset. */
+  allocBytes(n) {
+    const floats = Math.ceil(n / 4);
+    return this.alloc(floats) * 4;
+  }
+
+  /** An Int8Array view over the same memory. */
+  i8(byteOff, n) { return new Int8Array(this.memory.buffer, byteOff, n); }
+
   /** A Float32Array view -- shares bytes with WASM, no copy. */
   view(off, n) { return this.f32.subarray(off, off + n); }
 
@@ -62,5 +71,8 @@ export function heapFloatsFor({ vocab = 4096, d = 320, nLayer = 8, mult = 4,
                 + nLayer * (3 * d + ffn) + d;        // norms
   const kv = nLayer * 2 * cap * d;
   const scratch = 7 * d + 3 * ffn + vocab + cap + 4096;
-  return weights + kv + scratch;
+  // ternary states stored as int8 alongside the dense f32 copy: a quarter of the
+  // f32 footprint, and what the SIMD kernel actually reads
+  const ternary = vocab * d + nLayer * (4 * d * d + 2 * d * ffn);
+  return weights + kv + scratch + Math.ceil(ternary / 4) + 4096;
 }

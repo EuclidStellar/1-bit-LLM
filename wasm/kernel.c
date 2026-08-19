@@ -281,3 +281,50 @@ void attn_head(const float *q, const float *kc, const float *vc, float *out,
     for (; i < hd; ++i) o[i] += sc[t] * inv * v[i];
   }
 }
+
+
+// ---------------------------------------------------------------------------
+// Ternary matvec straight from int8 states -- 4x less memory traffic.
+//
+// The dense f32 path reads 44.6 MB of weights per token; at 600 tok/s that is
+// 26.8 GB/s and the real ceiling on most machines, since nothing close to 44 MB
+// fits in cache. The states are ternary, so int8 is the honest storage: 11.14 MB
+// per token instead. Costs four widening instructions per 16 weights and buys
+// back a factor of four in bandwidth.
+// ---------------------------------------------------------------------------
+EXPORT("matvec_i8")
+void matvec_i8(const float *x, const signed char *W, float *y,
+               int outF, int inF, float scale) {
+  for (int o = 0; o < outF; ++o) {
+    const signed char *w = W + (long)o * inF;
+    v128_t a0 = wasm_f32x4_splat(0.0f), a1 = wasm_f32x4_splat(0.0f);
+    v128_t a2 = wasm_f32x4_splat(0.0f), a3 = wasm_f32x4_splat(0.0f);
+    int i = 0;
+    for (; i + 16 <= inF; i += 16) {
+      v128_t b   = wasm_v128_load(w + i);                     // 16 int8 states
+      v128_t lo8 = wasm_i16x8_extend_low_i8x16(b);
+      v128_t hi8 = wasm_i16x8_extend_high_i8x16(b);
+      v128_t s0 = wasm_f32x4_convert_i32x4(wasm_i32x4_extend_low_i16x8(lo8));
+      v128_t s1 = wasm_f32x4_convert_i32x4(wasm_i32x4_extend_high_i16x8(lo8));
+      v128_t s2 = wasm_f32x4_convert_i32x4(wasm_i32x4_extend_low_i16x8(hi8));
+      v128_t s3 = wasm_f32x4_convert_i32x4(wasm_i32x4_extend_high_i16x8(hi8));
+      a0 = wasm_f32x4_add(a0, wasm_f32x4_mul(wasm_v128_load(x + i),      s0));
+      a1 = wasm_f32x4_add(a1, wasm_f32x4_mul(wasm_v128_load(x + i + 4),  s1));
+      a2 = wasm_f32x4_add(a2, wasm_f32x4_mul(wasm_v128_load(x + i + 8),  s2));
+      a3 = wasm_f32x4_add(a3, wasm_f32x4_mul(wasm_v128_load(x + i + 12), s3));
+    }
+    v128_t a = wasm_f32x4_add(wasm_f32x4_add(a0, a1), wasm_f32x4_add(a2, a3));
+    float acc = wasm_f32x4_extract_lane(a, 0) + wasm_f32x4_extract_lane(a, 1)
+              + wasm_f32x4_extract_lane(a, 2) + wasm_f32x4_extract_lane(a, 3);
+    for (; i < inF; ++i) acc += x[i] * (float)w[i];
+    y[o] = acc * scale;
+  }
+}
+
+// gather an embedding row from int8 states
+EXPORT("gather_row_i8")
+void gather_row_i8(const signed char *table, float *out, int row, int n,
+                   float scale) {
+  const signed char *src = table + (long)row * n;
+  for (int i = 0; i < n; ++i) out[i] = (float)src[i] * scale;
+}

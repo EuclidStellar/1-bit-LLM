@@ -54,7 +54,7 @@ export async function loadModel(url, onProgress, heap = null) {
   const header = JSON.parse(new TextDecoder().decode(buf.subarray(12, 12 + headerLen)));
   const blobStart = 12 + headerLen;
 
-  const T = {}, offsets = {};
+  const T = {}, offsets = {}, i8offsets = {};
   const place = (name, n) => {
     if (!heap) return new Float32Array(n);
     const off = heap.alloc(n);
@@ -69,6 +69,13 @@ export async function loadModel(url, onProgress, heap = null) {
       const data = place(t.name, t.n);
       const sc = t.scale;
       for (let i = 0; i < t.n; i++) data[i] = states[i] * sc;
+      if (heap) {
+        // the int8 states themselves: what the SIMD kernel reads, a quarter of
+        // the bytes of the dense f32 copy
+        const bo = heap.allocBytes(t.n);
+        heap.i8(bo, t.n).set(states);
+        i8offsets[t.name] = bo;
+      }
       T[t.name] = { data, shape: t.shape, states, scale: sc };
     } else {
       // aligned copy: subarray offsets are not guaranteed 4-byte aligned
@@ -84,7 +91,8 @@ export async function loadModel(url, onProgress, heap = null) {
   }
   T["head.weight"] = T["embed.weight"];                  // tied
   offsets["head.weight"] = offsets["embed.weight"];
-  return { tensors: T, offsets, header, bytes: got };
+  i8offsets["head.weight"] = i8offsets["embed.weight"];
+  return { tensors: T, offsets, i8offsets, header, bytes: got };
 }
 
 function fp16ToFp32(h) {
