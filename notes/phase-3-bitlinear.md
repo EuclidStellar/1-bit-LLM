@@ -122,7 +122,36 @@ At **equal memory budget**, the question is open: 4.61 MB of ternary buys
 11,159,360 params, while 4.21 MB of fp16 buys only 2,104,448. That comparison is
 the one BitNet actually claims, and it is the one worth running.
 
-_(result pending)_
+```
+                                        val     ppl      MB
+fp16    d=320   11,159,360 params    2.0553     7.8   22.32
+ternary d=320   11,159,360 params    2.1760     8.8    4.61
+fp16    d=128    2,104,448 params    2.3607    10.6    4.21
+```
+
+The fp16 comparison model received 9.5% fewer bytes, so correcting by
+log-linear interpolation between the two fp16 points:
+
+```
+fp16 params that fit in exactly 4.61 MB : 2,302,761   (d ~ 135)
+log-linear estimate of its loss         : 2.3442
+ternary measured                        : 2.1760
+  -> ternary wins by +0.1682 nats after correction
+```
+
+### Both statements are true, and both are measured
+
+| comparison | result |
+|---|---|
+| **equal parameter count** | ternary **loses** by 0.1207 nats (2.1760 vs 2.0553) |
+| **equal memory budget** | ternary **wins** by ~0.168 nats (2.1760 vs ~2.344) |
+
+4.61 MB buys **4.85x more parameters** as ternary than as fp16. Reporting only
+the first comparison understates ternary; reporting only the second overstates
+it. The pair is the finding.
+
+To measure rather than interpolate the fair point: `d=136, n_head=4` gives
+2,340,424 params at 4.68 MB, within 1.5% of the ternary budget.
 
 ## Verified along the way
 
@@ -144,3 +173,51 @@ the directory on `sys.path` while empty. Python's `FileFinder` caches that empty
 listing in `sys.path_importer_cache`, keyed by path string, and it survives
 removing and re-adding the entry to `sys.path`. The files then exist and the
 import still fails. Fix: `importlib.invalidate_caches()`.
+
+
+## How the paper handles the full-precision share: it does not
+
+Computed from BitNet b1.58 2B4T's own `config.json` (vocab 128,256, d 2,560,
+30 layers, ffn_inner 6,912, tied embeddings):
+
+```
+              ternary body        full precision      packed    fp share
+OURS  (11M)        1.9 MB              2.7 MB          4.6 MB     57.7%
+BitNet (2B)      366.1 MB            657.6 MB       1023.7 MB     64.2%
+```
+
+**BitNet's own model is 64.2% full precision by packed bytes -- worse than ours.**
+Independent validation that this arithmetic is right: the computed ternary body
+is 366 MB, and the paper's published figure is "Memory (Non-emb) 0.4GB". The
+658 MB embedding table is simply not in the headline number.
+
+### Which lever moves the ratio
+
+fp share is governed by `d*L/V`, and only `d` sits in the quadratic term -- the
+body grows as `d^2*L` while the embedding grows only as `d`. Holding
+V = 128,256:
+
+| | d=1024 | d=2560 | d=4096 | d=8192 |
+|---|---|---|---|---|
+| L=8 | 94.4% | 87.1% | 80.8% | 67.8% |
+| L=30 *(BitNet)* | 81.8% | **64.2%** | 52.9% | 35.9% |
+| L=64 | 67.8% | 45.7% | 34.5% | 20.9% |
+
+Depth helps linearly, **width helps quadratically**. So the 1-bit memory claim
+strengthens automatically with scale, and an 11M-parameter model is inherently a
+poor showcase for it.
+
+### The distinction that makes "non-emb" defensible for one claim and not the other
+
+**For the compute claim it is the right number.** The embedding is a gather, not
+a matmul -- no multiplication happens. The body holds essentially all the
+multiply-accumulates, and ternary genuinely removes the multiplier from them.
+
+**For the memory claim it is the wrong number.** A 1 GB file is a 1 GB file.
+
+BitNet's paper argues compute and energy, where the exclusion is legitimate. The
+figure gets quoted as file size, where it is not.
+
+One correction to that framing in our favour of accuracy: the tied LM head *is* a
+real matmul (d x V per token) and stays full precision -- 12% of MACs for us,
+15% for BitNet. So "no multipliers" is ~88%, not 100%.
