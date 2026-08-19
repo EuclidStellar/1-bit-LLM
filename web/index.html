@@ -1,0 +1,326 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>A 2.3 MB Language Model</title>
+<meta name="description" content="An 11M-parameter BitNet b1.58 model running entirely in your browser. 2.31 MB, ternary weights, no server.">
+<style>
+  :root{
+    --ground:#F6F6F4; --surface:#FFFFFF; --sunk:#EFEFEC;
+    --ink:#15171B; --ink-mid:#4B5158; --ink-soft:#6E757D;
+    --rule:#DCDDDA; --rule-soft:#E8E9E6;
+    --accent:#8F5A0C; --accent-soft:#F4E7D0;
+    --pos:#2C6B57; --neg:#94382C;
+    --serif:Charter,"Iowan Old Style","Palatino Linotype",Palatino,Georgia,serif;
+    --sans:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"Helvetica Neue",Arial,sans-serif;
+    --mono:ui-monospace,"SF Mono",SFMono-Regular,Menlo,Monaco,Consolas,monospace;
+  }
+  @media (prefers-color-scheme:dark){:root{
+    --ground:#101317; --surface:#171A1F; --sunk:#1D2126;
+    --ink:#E9E7E2; --ink-mid:#A8AEB6; --ink-soft:#868D95;
+    --rule:#2B3037; --rule-soft:#22262B;
+    --accent:#E0A249; --accent-soft:#3A2D18;
+    --pos:#74C2A3; --neg:#DE8069;
+  }}
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--ground);color:var(--ink);font-family:var(--sans);
+       font-size:16px;line-height:1.6;-webkit-font-smoothing:antialiased}
+  .page{max-width:1000px;margin:0 auto;padding:clamp(2rem,5vw,4rem) clamp(1rem,4vw,2.5rem) 5rem}
+  .eyebrow{font-family:var(--mono);font-size:.68rem;letter-spacing:.14em;
+           text-transform:uppercase;color:var(--accent);margin:0 0 1.1rem}
+  h1{font-family:var(--serif);font-weight:600;font-size:clamp(2.1rem,5.5vw,3.3rem);
+     line-height:1.05;letter-spacing:-.02em;margin:0 0 1.1rem}
+  .standfirst{font-family:var(--serif);font-size:clamp(1.05rem,2vw,1.22rem);
+              line-height:1.5;color:var(--ink-mid);max-width:60ch;margin:0 0 2rem}
+  h2{font-family:var(--serif);font-weight:600;font-size:1.35rem;margin:0 0 .8rem;
+     letter-spacing:-.01em}
+  p{margin:0 0 .9rem} p:last-child{margin-bottom:0}
+  a{color:var(--ink);border-bottom:1px solid var(--accent);text-decoration:none}
+  a:hover{color:var(--accent)}
+  code,.m{font-family:var(--mono);font-size:.85em}
+  strong{font-weight:650}
+
+  .panel{background:var(--surface);border:1px solid var(--rule);padding:1.2rem 1.3rem;
+         margin:0 0 1.2rem}
+  .stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(130px,1fr));gap:1rem}
+  .stat .k{font-family:var(--mono);font-size:.6rem;letter-spacing:.1em;
+           text-transform:uppercase;color:var(--ink-soft);display:block}
+  .stat .v{font-family:var(--mono);font-size:1.32rem;font-weight:600;
+           color:var(--ink);font-variant-numeric:tabular-nums}
+  .stat .v.hl{color:var(--accent)}
+
+  .bar{height:4px;background:var(--sunk);border-radius:2px;overflow:hidden;margin:.7rem 0 0}
+  .bar > i{display:block;height:100%;width:0;background:var(--accent);transition:width .15s}
+  .status{font-family:var(--mono);font-size:.75rem;color:var(--ink-soft);margin:.6rem 0 0}
+  .status.ok{color:var(--pos)} .status.bad{color:var(--neg)}
+
+  label{font-family:var(--mono);font-size:.62rem;letter-spacing:.1em;
+        text-transform:uppercase;color:var(--ink-soft);display:block;margin:0 0 .3rem}
+  textarea,input[type=number],select{width:100%;font-family:var(--sans);font-size:.95rem;
+    background:var(--ground);color:var(--ink);border:1px solid var(--rule);
+    border-radius:3px;padding:.55rem .65rem}
+  textarea{resize:vertical;min-height:4.5rem}
+  input[type=range]{width:100%;accent-color:var(--accent)}
+  .row{display:grid;grid-template-columns:repeat(auto-fit,minmax(120px,1fr));gap:.9rem;
+       margin:0 0 .9rem}
+  button{font-family:var(--sans);font-size:.92rem;font-weight:600;cursor:pointer;
+    background:var(--accent);color:var(--ground);border:0;border-radius:3px;
+    padding:.6rem 1.3rem}
+  button:disabled{opacity:.45;cursor:not-allowed}
+  button.ghost{background:transparent;color:var(--ink);border:1px solid var(--rule)}
+  button:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+
+  #out{font-family:var(--serif);font-size:1.04rem;line-height:1.62;white-space:pre-wrap;
+       min-height:11rem;background:var(--surface);border:1px solid var(--rule);
+       padding:1.1rem 1.2rem;margin:0}
+  #out .cursor{display:inline-block;width:.5em;height:1.05em;background:var(--accent);
+               vertical-align:-.16em;animation:bl 1s step-end infinite}
+  @keyframes bl{50%{opacity:0}}
+  @media (prefers-reduced-motion:reduce){#out .cursor{animation:none}}
+
+  pre.grid{font-family:var(--mono);font-size:9px;line-height:1.14;letter-spacing:.5px;
+    background:var(--sunk);border:1px solid var(--rule-soft);padding:.8rem;
+    overflow-x:auto;margin:.8rem 0 0;color:var(--ink-mid)}
+  table{border-collapse:collapse;width:100%;font-size:.86rem;margin:.8rem 0 0}
+  th{font-family:var(--mono);font-size:.6rem;letter-spacing:.1em;text-transform:uppercase;
+     color:var(--ink-soft);text-align:left;padding:.5rem .6rem;
+     border-bottom:1px solid var(--rule)}
+  td{padding:.45rem .6rem;border-bottom:1px solid var(--rule-soft);color:var(--ink-mid)}
+  td.n{font-family:var(--mono);font-variant-numeric:tabular-nums;color:var(--ink)}
+  footer{margin-top:3rem;padding-top:1.3rem;border-top:1px solid var(--rule);
+         font-size:.85rem;color:var(--ink-soft)}
+  section{margin-top:2.6rem}
+</style>
+</head>
+<body>
+<div class="page">
+
+<p class="eyebrow">bitnet b1.58 &middot; built from scratch</p>
+<h1>A 2.3&nbsp;MB language model</h1>
+<p class="standfirst">Eleven million parameters, of which 11,141,120 are stored at
+<strong>1.6 bits each</strong>. It runs entirely in this tab &mdash; the weights
+download once and every token after that is computed on your own machine. No
+server, no API key, no round trip.</p>
+
+<div class="panel">
+  <div class="stats">
+    <div class="stat"><span class="k">model size</span><span class="v hl" id="sSize">&mdash;</span></div>
+    <div class="stat"><span class="k">parameters</span><span class="v" id="sParams">&mdash;</span></div>
+    <div class="stat"><span class="k">ternary share</span><span class="v" id="sTern">&mdash;</span></div>
+    <div class="stat"><span class="k">tokens / sec</span><span class="v hl" id="sTps">&mdash;</span></div>
+  </div>
+  <div class="bar"><i id="bar"></i></div>
+  <p class="status" id="status">fetching weights&hellip;</p>
+</div>
+
+<div class="panel">
+  <label for="prompt">Prompt</label>
+  <textarea id="prompt">Once upon a time</textarea>
+  <div class="row">
+    <div><label for="nnew">New tokens <span class="m" id="vNew">120</span></label>
+      <input type="range" id="nnew" min="20" max="240" step="10" value="120"></div>
+    <div><label for="temp">Temperature <span class="m" id="vTemp">0.80</span></label>
+      <input type="range" id="temp" min="0.1" max="1.5" step="0.05" value="0.8"></div>
+    <div><label for="topk">Top-k <span class="m" id="vTopk">100</span></label>
+      <input type="range" id="topk" min="0" max="400" step="10" value="100"></div>
+    <div><label for="seed">Seed</label>
+      <input type="number" id="seed" value="0"></div>
+  </div>
+  <div style="display:flex;gap:.6rem;flex-wrap:wrap">
+    <button id="go" disabled>Generate</button>
+    <button id="stop" class="ghost" disabled>Stop</button>
+  </div>
+</div>
+
+<div id="out"></div>
+
+<section>
+  <h2>What it will and will not do</h2>
+  <p>It writes grammatical children's stories with dialogue and an ending. It
+  <strong>loses track of who is who after a few sentences</strong> &mdash;
+  characters change name, objects become other objects, a rabbit may fly. That is
+  not the quantization: the full-precision version of this model does it too. It
+  was trained on 20 million tokens, about <strong>11&times; less</strong> than the
+  compute-optimal budget, because the point was measuring what ternary weights
+  cost, not maximizing quality.</p>
+  <p>It knows no facts, cannot answer questions, and has never seen anything
+  outside simple narrative English.</p>
+</section>
+
+<section>
+  <h2>Look at the weights</h2>
+  <p>Ternary weights have three states, so a weight matrix prints as a picture:
+  <code>-</code> is &minus;1, <code>&middot;</code> is zero &mdash; no connection
+  &mdash; and <code>+</code> is +1. Very few models let you read their parameters
+  directly.</p>
+  <div class="row">
+    <div><label for="layer">Layer</label><select id="layer"></select></div>
+    <div><label for="rows">Rows <span class="m" id="vRows">26</span></label>
+      <input type="range" id="rows" min="8" max="60" step="2" value="26"></div>
+    <div><label for="cols">Columns <span class="m" id="vCols">100</span></label>
+      <input type="range" id="cols" min="20" max="200" step="10" value="100"></div>
+  </div>
+  <button id="look" class="ghost" disabled>Show</button>
+  <div id="wstats"></div>
+  <pre class="grid" id="wgrid"></pre>
+</section>
+
+<footer>
+  <p>The forward pass is plain JavaScript &mdash; base-3 unpacking, RMSNorm, RoPE,
+  causal attention with a KV cache, squared ReLU, and per-token int8 activation
+  quantization. On load it verifies its own logits against the PyTorch reference,
+  so if the implementation were wrong you would see it fail above rather than read
+  slightly-wrong stories.</p>
+  <p><a href="https://huggingface.co/euclidstellar/tinystories-1bit-llm">Model card</a>
+  &middot; <a href="https://github.com/EuclidStellar/1-bit-LLM">Code and build notes</a>
+  &middot; <a href="https://arxiv.org/abs/2504.12285">BitNet b1.58 2B4T</a></p>
+</footer>
+</div>
+
+<script type="module">
+import { loadModel, BitLM, sample } from "./bitllm.js";
+import { Tokenizer } from "./tokenizer.js";
+
+const HF = "https://huggingface.co/euclidstellar/tinystories-1bit-llm/resolve/main/";
+const DATA = "https://huggingface.co/datasets/euclidstellar/tinystories-bpe4096/resolve/main/";
+
+const $ = id => document.getElementById(id);
+const setStatus = (t, cls = "") => { $("status").textContent = t; $("status").className = "status " + cls; };
+const fmt = n => n.toLocaleString("en-US");
+
+let MODEL, LM, TOK, running = false, stopFlag = false;
+
+// deterministic RNG so a given seed reproduces a given story
+function mulberry(a) {
+  return () => { a |= 0; a = a + 0x6D2B79F5 | 0;
+    let t = Math.imul(a ^ a >>> 15, 1 | a);
+    t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t;
+    return ((t ^ t >>> 14) >>> 0) / 4294967296; };
+}
+
+for (const [r, out, f] of [["nnew","vNew",v=>v],["temp","vTemp",v=>(+v).toFixed(2)],
+                           ["topk","vTopk",v=>v],["rows","vRows",v=>v],["cols","vCols",v=>v]])
+  $(r).addEventListener("input", e => $(out).textContent = f(e.target.value));
+
+async function boot() {
+  try {
+    MODEL = await loadModel(HF + "model_packed.bin", (got, total) => {
+      const pct = total ? got / total * 100 : 0;
+      $("bar").style.width = pct + "%";
+      setStatus(`weights ${(got/1e6).toFixed(2)} MB${total ? " / " + (total/1e6).toFixed(2) + " MB" : ""}`);
+    });
+    $("sSize").textContent = (MODEL.bytes / 1e6).toFixed(2) + " MB";
+
+    const c = MODEL.header.counts || {};
+    const tern = c.ternary_weights ?? 0, full = c.full_precision_weights ?? 0;
+    $("sParams").textContent = fmt(tern + full);
+    $("sTern").textContent = ((tern / (tern + full)) * 100).toFixed(2) + "%";
+
+    setStatus("loading tokenizer...");
+    TOK = new Tokenizer(await (await fetch(DATA + "tokenizer.json")).json());
+    LM = new BitLM(MODEL, { maxT: 256 });
+
+    // ---- verify against the PyTorch reference --------------------------
+    setStatus("verifying against PyTorch reference...");
+    let verdict = "";
+    try {
+      const ref = await (await fetch(HF + "reference.json")).json();
+      LM.reset();
+      let last = null;
+      for (const id of ref.input_ids) last = LM.forward(id);
+      let mx = 0;
+      for (let i = 0; i < last.length; i++)
+        mx = Math.max(mx, Math.abs(last[i] - ref.logits_last[i]));
+      const rel = mx / Math.max(...ref.logits_last.map(Math.abs));
+      verdict = mx < 0.05
+        ? `verified: max logit deviation ${mx.toExponential(2)} (${(rel*100).toFixed(3)}% relative)`
+        : `MISMATCH: max logit deviation ${mx.toExponential(2)} -- the JS forward pass is wrong`;
+      setStatus(verdict, mx < 0.05 ? "ok" : "bad");
+    } catch {
+      setStatus("ready (reference.json not published, so unverified)", "");
+    }
+
+    const names = MODEL.header.tensors.filter(t => t.kind === "ternary").map(t => t.name);
+    $("layer").innerHTML = names.map(n => `<option>${n}</option>`).join("");
+    $("go").disabled = false; $("look").disabled = false;
+    $("bar").style.width = "100%";
+  } catch (e) {
+    setStatus("failed to load: " + e.message, "bad");
+  }
+}
+
+async function generate() {
+  if (running) return;
+  running = true; stopFlag = false;
+  $("go").disabled = true; $("stop").disabled = false;
+
+  const prompt = $("prompt").value;
+  const n = +$("nnew").value, temp = +$("temp").value, topk = +$("topk").value;
+  const rng = mulberry(+$("seed").value | 0);
+  const ids = TOK.encode(prompt);
+  const eot = TOK.eotId;
+
+  LM.reset();
+  const el = $("out");
+  el.textContent = prompt;
+  const cur = document.createElement("span");
+  cur.className = "cursor"; el.appendChild(cur);
+
+  let logits = null;
+  for (const id of ids) logits = LM.forward(id);   // prefill
+
+  const gen = [];
+  const t0 = performance.now();
+  for (let i = 0; i < n && !stopFlag; i++) {
+    const next = sample(logits, temp, topk, rng);
+    gen.push(next);
+    el.textContent = prompt + TOK.decode(gen, true);
+    el.appendChild(cur);
+    if (next === eot && i > 8) break;
+    if (LM.pos >= LM.maxT) break;
+    logits = LM.forward(next);
+    const tps = gen.length / ((performance.now() - t0) / 1000);
+    $("sTps").textContent = tps.toFixed(1);
+    await new Promise(r => setTimeout(r, 0));      // let the UI paint
+  }
+  cur.remove();
+  const dt = (performance.now() - t0) / 1000;
+  setStatus(`${gen.length} tokens in ${dt.toFixed(2)}s = ${(gen.length/dt).toFixed(1)} tok/s `
+          + `(plain JavaScript, single thread)`, "ok");
+  running = false; $("go").disabled = false; $("stop").disabled = true;
+}
+
+function look() {
+  const name = $("layer").value;
+  const t = MODEL.tensors[name];
+  const [outF, inF] = t.shape;
+  const s = t.states;
+  const r = Math.min(+$("rows").value, outF), c = Math.min(+$("cols").value, inF);
+  const G = { "-1": "-", "0": "·", "1": "+" };
+  let g = "";
+  for (let i = 0; i < r; i++) {
+    for (let j = 0; j < c; j++) g += G[String(s[i * inF + j])];
+    g += "\n";
+  }
+  $("wgrid").textContent = g;
+  let neg = 0, zero = 0, pos = 0;
+  for (let i = 0; i < s.length; i++) { const v = s[i]; if (v === 0) zero++; else if (v > 0) pos++; else neg++; }
+  const n = s.length, pc = x => (x / n * 100).toFixed(2) + "%";
+  $("wstats").innerHTML =
+    `<table><tr><th>${name}</th><th>weights</th><th>&minus;1</th><th>0</th><th>+1</th><th>scale</th></tr>`
+    + `<tr><td class="n">${outF} &times; ${inF}</td><td class="n">${fmt(n)}</td>`
+    + `<td class="n">${pc(neg)}</td><td class="n">${pc(zero)}</td><td class="n">${pc(pos)}</td>`
+    + `<td class="n">${t.scale.toExponential(3)}</td></tr></table>`
+    + `<p style="font-size:.85rem;color:var(--ink-soft);margin:.7rem 0 0">Showing the `
+    + `top-left ${r} &times; ${c} corner. For Gaussian weights the zero fraction is `
+    + `analytically 31.01% &mdash; training barely moves it.</p>`;
+}
+
+$("go").addEventListener("click", generate);
+$("stop").addEventListener("click", () => { stopFlag = true; });
+$("look").addEventListener("click", look);
+boot();
+</script>
+</body>
+</html>
