@@ -341,3 +341,54 @@ Relative deviation is ~1e-9, irrelevant to training. But:
 - do not test "is it quantized" by counting unique values on the STE output
 - **when packing weights for inference, pack from `quantize_weight(w)` directly,
   never from the STE output**
+
+
+## CORRECTION to the precision accounting above
+
+The Pareto table bucketed 1,328,960 params as "full precision" -- that is the
+embedding (1,310,720) **plus** the norms (18,240). For the ternary-embed row the
+whole bucket was then quantized while the column kept its label, so the reported
+"11.9% fp share" is actually the **embedding's share of the packed file**, not the
+full-precision share. Three buckets, correctly separated:
+
+| configuration | MB | at 1.58 bits | at 8 bits | at fp16 | vs fp16 |
+|---|---|---|---|---|---|
+| all fp16 | 22.32 | 0% | 0% | 100% | 1.00x |
+| ternary body, fp16 embed | 4.61 | 42.3% | 0% | 57.7% | 4.85x |
+| ternary body, int8 embed | 3.29 | 59.1% | 39.8% | **1.11%** | 6.77x |
+| **ternary body, ternary embed** | **2.24** | **98.4%** | 0% | **1.63%** | **9.95x** |
+
+```
+ternary-embed model by parameter count:
+  ternary       11,141,120   99.84%
+  fp16 (norms)      18,240    0.16%    <- 41 RMSNorm vectors, 36 KB
+```
+
+**98.4% of the packed file is 1.58-bit weights.** The only full-precision
+parameters remaining are the normalization vectors.
+
+For comparison, **BitNet b1.58 2B4T is 64.2% fp16 by packed bytes**, because it
+holds a 128,256 x 2,560 embedding table at bf16. Quantizing the embedding is what
+moves a model from "mostly fp16 with a ternary body" to "actually 1-bit".
+
+## Honest assessment against the BitNet spec
+
+Architecture fidelity is complete: ternary per-tensor absmean weights, per-token
+absmax int8 activations, SubLN, squared ReLU, RoPE, no biases, tied embeddings,
+trained quantized from scratch. The embedding quantization goes beyond the paper.
+
+**But this is a training-time demonstration, not an inference artifact.** Six gaps:
+
+1. **Weights are not packed.** 2.24 MB is arithmetic. The file on disk is 44.7 MB
+   of fp32 master weights. Nothing has been written at 1.58 bits.
+2. **No integer inference path.** The forward pass runs fp32 matmuls on tensors
+   that merely *contain* ternary values. No add/subtract/skip exists. BitNet's
+   central claim -- eliminating the multiplier -- is unrealized.
+3. **Under-trained**: 1.8 tokens/param vs Chinchilla ~20.
+4. **Hard scale regime**: 11M vs 2B. The memory advantage grows as d^2 while the
+   embedding grows as d, so small models are the worst case for this claim. The
+   equal-memory win held anyway.
+5. **No standard benchmarks.** Val loss on TinyStories only.
+6. **act_bits=8 never ablated.** int8 activations assumed to matter, not tested.
+
+Gaps 1 and 2 are the same gap, and they are Phase 4.
