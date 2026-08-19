@@ -270,3 +270,74 @@ The above is **PTQ on the embedding** -- quantizing a table that was trained in
 fp32. On the body, PTQ vs QAT was worth 2.85 nats. So a model *trained* with
 ternary embeddings could plausibly recover most of that 0.5596. If it does:
 fp share 11.9%, packed 2.21 MB, 10.1x compression against fp16. Untested.
+
+
+## Quantization-aware training on the embedding table (beyond the paper)
+
+BitNet holds the embedding at bf16 throughout. Training it as ternary through the
+same STE:
+
+```
+ternary body, ternary embed (PTQ)  2.7385   ppl 15.5
+ternary body, ternary embed (QAT)  2.3107   ppl 10.1     913s
+  -> QAT recovered 76.0% of the 0.5596 nats PTQ cost
+```
+
+Cost of a ternary embedding, once trained: **+0.1347 nats** over the fp16-embed
+baseline of 2.1760. For that, the packed model goes 4.61 -> 2.21 MB and the
+full-precision share collapses from 57.7% to **11.9%**.
+
+### QAT recovers most of what PTQ destroys, wherever it is applied
+
+```
+body       PTQ 5.0229 -> QAT 2.1760   (vs fp32 2.0553)    95.9% recovered
+embedding  PTQ 2.7385 -> QAT 2.3107   (vs      2.1760)    76.0% recovered
+```
+
+This is the paper's central claim generalized to a component the paper never
+quantizes. It is also what makes the model genuinely 1-bit rather than
+mostly-fp16: 88.1% of the 2.21 MB file is ternary.
+
+## The Pareto frontier
+
+| configuration | val | ppl | packed MB | fp share | vs fp16 |
+|---|---|---|---|---|---|
+| fp32 body, fp16 embed | 2.0553 | 7.8 | 22.32 | — | 1.00x |
+| ternary body, fp16 embed | 2.1760 | 8.8 | 4.61 | 57.7% | 4.85x |
+| **ternary body, int8 embed (PTQ)** | **2.1795** | **8.8** | **3.28** | **40.6%** | **6.81x** |
+| ternary body, ternary embed (QAT) | 2.3107 | 10.1 | 2.21 | 11.9% | 10.09x |
+
+**10.1x smaller than fp16 for a total cost of 0.2554 nats.**
+
+The int8-embedding row is the practical choice: 6.81x compression for +0.0006
+nats, which is noise. The ternary-embedding row trades 0.1347 nats for another
+32% off the file and a genuinely 1-bit weight format.
+
+## Ternary wins at every memory budget tested
+
+fp16 alternatives sized to the same bytes, loss estimated by log-linear
+interpolation between the two measured fp16 points (d=128 at 2.3607 and d=320 at
+2.0553):
+
+| budget | fp16 params it buys | fp16 estimated | ternary measured | margin |
+|---|---|---|---|---|
+| 4.61 MB | 2,305,000 | 2.3440 | **2.1760** | **+0.168** |
+| 3.28 MB | 1,640,000 | 2.4063 | **2.1795** | **+0.227** |
+| 2.21 MB | 1,105,000 | 2.4786 | **2.3107** | **+0.168** |
+
+A consistent 0.17-0.23 nat advantage across a 2x range of budgets, not a single
+fortunate operating point.
+
+## A floating-point detail that matters for Phase 4
+
+`ste(w, q)` returns `w + (q - w).detach()`, which equals `q` in exact arithmetic
+but **not** in fp32: `q - w` rounds, then adding `w` rounds again. Counting
+unique values on the STE output of a ternary tensor gives **7**, not 3 -- roughly
+three adjacent floats near `+g`, three near `-g`, and exactly zero (IEEE-754
+guarantees `w + (-w) == 0`).
+
+Relative deviation is ~1e-9, irrelevant to training. But:
+
+- do not test "is it quantized" by counting unique values on the STE output
+- **when packing weights for inference, pack from `quantize_weight(w)` directly,
+  never from the STE output**
