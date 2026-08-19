@@ -24,7 +24,12 @@ function unpackBase3(bytes, n) {
 }
 
 // ---------- model file ------------------------------------------------------
-export async function loadModel(url, onProgress) {
+/**
+ * @param heap  optional Heap. If given, every tensor is written into the shared
+ *              linear memory and `offsets` maps names to float offsets, so the
+ *              WASM kernel and the JS engine read the exact same bytes.
+ */
+export async function loadModel(url, onProgress, heap = null) {
   const res = await fetch(url);
   if (!res.ok) throw new Error(`fetch ${res.status} ${res.statusText}`);
 
@@ -49,27 +54,37 @@ export async function loadModel(url, onProgress) {
   const header = JSON.parse(new TextDecoder().decode(buf.subarray(12, 12 + headerLen)));
   const blobStart = 12 + headerLen;
 
-  const T = {};
+  const T = {}, offsets = {};
+  const place = (name, n) => {
+    if (!heap) return new Float32Array(n);
+    const off = heap.alloc(n);
+    offsets[name] = off;
+    return heap.view(off, n);
+  };
+
   for (const t of header.tensors) {
     const raw = buf.subarray(blobStart + t.offset, blobStart + t.offset + t.nbytes);
     if (t.kind === "ternary") {
       const states = unpackBase3(raw, t.n);
-      const data = new Float32Array(t.n);
-      const s = t.scale;
-      for (let i = 0; i < t.n; i++) data[i] = states[i] * s;
-      T[t.name] = { data, shape: t.shape, states, scale: s };
+      const data = place(t.name, t.n);
+      const sc = t.scale;
+      for (let i = 0; i < t.n; i++) data[i] = states[i] * sc;
+      T[t.name] = { data, shape: t.shape, states, scale: sc };
     } else {
       // aligned copy: subarray offsets are not guaranteed 4-byte aligned
       const copy = new Uint8Array(raw.length);
       copy.set(raw);
-      const data = t.kind === "fp32"
+      const src = t.kind === "fp32"
         ? new Float32Array(copy.buffer)
         : Float32Array.from(new Uint16Array(copy.buffer), fp16ToFp32);
+      const data = place(t.name, src.length);
+      if (data !== src) data.set(src);
       T[t.name] = { data, shape: t.shape };
     }
   }
-  T["head.weight"] = T["embed.weight"];          // tied
-  return { tensors: T, header, bytes: got };
+  T["head.weight"] = T["embed.weight"];                  // tied
+  offsets["head.weight"] = offsets["embed.weight"];
+  return { tensors: T, offsets, header, bytes: got };
 }
 
 function fp16ToFp32(h) {

@@ -140,6 +140,8 @@ server, no API key, no round trip.</p>
       </select></div>
     <div><label for="freq">Repetition penalty <span class="m" id="vFreq">0.6</span></label>
       <input type="range" id="freq" min="0" max="2" step="0.1" value="0.6"></div>
+    <div><label for="engine">Engine</label>
+      <select id="engine"><option value="js">JavaScript</option></select></div>
     <div><label for="ngram">Block repeated</label>
       <select id="ngram">
         <option value="0">off</option>
@@ -217,6 +219,8 @@ server, no API key, no round trip.</p>
 import { loadModel, BitLM, sample, NoRepeatNGram, frequencyPenalty }
   from "./bitllm.js";
 import { Tokenizer } from "./tokenizer.js";
+import { Heap, heapFloatsFor } from "./heap.js";
+import { loadKernel, WasmBitLM } from "./wasmlm.js";
 
 const HF = "https://huggingface.co/euclidstellar/tinystories-1bit-llm/resolve/main/";
 const DATA = "https://huggingface.co/datasets/euclidstellar/tinystories-bpe4096/resolve/main/";
@@ -225,7 +229,7 @@ const $ = id => document.getElementById(id);
 const setStatus = (t, cls = "") => { $("status").textContent = t; $("status").className = "status " + cls; };
 const fmt = n => n.toLocaleString("en-US");
 
-let MODEL, LM, TOK, running = false, stopFlag = false;
+let MODEL, LM, JSLM, WLM, TOK, HEAP, running = false, stopFlag = false;
 
 // deterministic RNG so a given seed reproduces a given story
 function mulberry(a) {
@@ -242,13 +246,28 @@ for (const [r, out, f] of [["temp","vTemp",v=>(+v).toFixed(2)],
 
 async function boot() {
   try {
+    // One linear memory shared by the WASM kernel and the JS engine. Both read
+    // the same bytes, so comparing their logits is a real test.
+    HEAP = new Heap(heapFloatsFor({}));
+
+    let K = null, kbytes = 0;
+    try {
+      setStatus("loading SIMD kernel...");
+      const k = await loadKernel(HF + "kernel.wasm", HEAP);
+      K = k.K; kbytes = k.size;
+    } catch (e) {
+      console.warn("no WASM kernel:", e.message);
+      HEAP.setBase(0);                       // keep the JS-only floor
+    }
+
     MODEL = await loadModel(HF + "model_packed.bin", (got, total) => {
       const pct = total ? got / total * 100 : 0;
       $("bar").style.width = pct + "%";
-      setStatus(`weights ${(got/1e6).toFixed(2)} MB${total ? " / " + (total/1e6).toFixed(2) + " MB" : ""}`);
-    });
-    $("sSize").textContent = (MODEL.bytes / 1e6).toFixed(2) + " MB";
+      setStatus(`weights ${(got/1e6).toFixed(2)} MB`
+              + (total ? " / " + (total/1e6).toFixed(2) + " MB" : ""));
+    }, HEAP);
 
+    $("sSize").textContent = (MODEL.bytes / 1e6).toFixed(2) + " MB";
     const c = MODEL.header.counts || {};
     const tern = c.ternary_weights ?? 0, full = c.full_precision_weights ?? 0;
     $("sParams").textContent = fmt(tern + full);
@@ -256,10 +275,34 @@ async function boot() {
 
     setStatus("loading tokenizer...");
     TOK = new Tokenizer(await (await fetch(DATA + "tokenizer.json")).json());
-    LM = new BitLM(MODEL, { maxT: 256 });
 
-    // ---- verify against the PyTorch reference --------------------------
-    setStatus("verifying against PyTorch reference...");
+    JSLM = new BitLM(MODEL, { cap: 256 });
+    if (K) {
+      try {
+        WLM = new WasmBitLM(MODEL, HEAP, K, { cap: 256 });
+        $("engine").innerHTML =
+          '<option value="wasm" selected>WASM + SIMD128</option>'
+        + '<option value="js">JavaScript (reference)</option>';
+      } catch (e) { console.warn("WasmBitLM failed:", e.message); WLM = null; }
+    }
+    LM = WLM || JSLM;
+
+    // ---- verify: WASM against JS, then whichever against PyTorch ----------
+    const notes = [];
+    if (WLM) {
+      const probe = [438, 453, 259, 404, 408, 282, 259, 406];
+      JSLM.reset(); WLM.reset();
+      let a = null, b = null;
+      for (const id of probe) { a = JSLM.forward(id); b = WLM.forward(id); }
+      let mx = 0;
+      for (let i = 0; i < a.length; i++) mx = Math.max(mx, Math.abs(a[i] - b[i]));
+      let ja = 0, wb = 0;
+      for (let i = 1; i < a.length; i++) { if (a[i] > a[ja]) ja = i; if (b[i] > b[wb]) wb = i; }
+      notes.push(`wasm vs js: argmax ${ja === wb ? "agree" : "DISAGREE"}, `
+               + `max logit delta ${mx.toExponential(2)}`);
+      if (ja !== wb) { console.error("WASM disagrees with JS -- falling back"); LM = JSLM; }
+    }
+
     try {
       const ref = await (await fetch(HF + "reference.json")).json();
       LM.reset();
@@ -271,36 +314,29 @@ async function boot() {
         for (let i = 1; i < last.length; i++) if (last[i] > last[bi]) bi = i;
         mine.push(bi);
       }
-      // Argmax agreement is the meaningful test. Max absolute logit deviation is
-      // NOT: the int8 activation quantizer is a step function, so a 1e-9 input
-      // difference flips a whole quantization level. Two PyTorch models with
-      // bit-identical ternary weights measured 0.178 max deviation for exactly
-      // this reason. JS computes in fp64 and stores fp32; PyTorch is fp32.
       const n = ref.argmax_per_pos.length;
       let agree = 0;
       for (let i = 0; i < n; i++) if (mine[i] === ref.argmax_per_pos[i]) agree++;
-      let mx = 0, sum = 0;
-      for (let i = 0; i < last.length; i++) {
-        const d = Math.abs(last[i] - ref.logits_last[i]);
-        if (d > mx) mx = d;
-        sum += d;
-      }
-      const mean = sum / last.length;
-      const ok = agree === n;
-      setStatus(`${ok ? "verified" : "MISMATCH"}: argmax agrees at ${agree}/${n} `
-              + `positions | logit deviation max ${mx.toExponential(2)}, `
-              + `mean ${mean.toExponential(2)}`, ok ? "ok" : "bad");
-      if (!ok) console.warn("reference argmax", ref.argmax_per_pos, "ours", mine);
+      notes.push(`vs pytorch: argmax ${agree}/${n}`);
+      if (agree !== n) console.warn("ref", ref.argmax_per_pos, "ours", mine);
+      setStatus(notes.join(" | ") + ` | heap ${HEAP.usedMB.toFixed(1)}/`
+              + `${HEAP.totalMB.toFixed(0)} MB`
+              + (kbytes ? `, kernel ${(kbytes/1024).toFixed(1)} KB` : ""),
+              agree === n ? "ok" : "bad");
     } catch (e) {
-      setStatus("ready (reference not loaded: " + e.message + ")", "");
+      setStatus(notes.join(" | ") + " | reference not loaded", "");
     }
 
     const names = MODEL.header.tensors.filter(t => t.kind === "ternary").map(t => t.name);
     $("layer").innerHTML = names.map(n => `<option>${n}</option>`).join("");
+    $("engine").addEventListener("change", e => {
+      LM = e.target.value === "wasm" && WLM ? WLM : JSLM;
+    });
     $("go").disabled = false; $("look").disabled = false;
     $("bar").style.width = "100%";
   } catch (e) {
     setStatus("failed to load: " + e.message, "bad");
+    console.error(e);
   }
 }
 
