@@ -155,7 +155,7 @@ server, no API key, no round trip.</p>
     <button id="stop" class="ghost" disabled>Stop</button>
     <button id="prof" class="ghost" disabled>Profile</button>
   </div>
-  <div id="proftab"></div>
+  <div id="proftab" style="margin-top:1rem"></div>
 </div>
 
 <div id="out"></div>
@@ -375,7 +375,7 @@ async function generate() {
   const cur = document.createElement("span");
   cur.className = "cursor"; el.appendChild(cur);
 
-  let count = 0;
+  let count = 0, steadyCount = 0, steadyMs = 0, steadyT0 = 0;
   const t0 = performance.now();
   let lastPaint = t0;
 
@@ -402,16 +402,25 @@ async function generate() {
       lastPaint = now;
       await new Promise(r => setTimeout(r, 0));
     }
+    // start the steady-state clock once the ring is full
+    if (steadyT0 === 0 && LM.contextUsed >= LM.cap) steadyT0 = performance.now();
     logits = LM.forward(next);      // ring buffer: no re-prefill, ever
+    if (steadyT0 > 0) { steadyCount++; steadyMs = performance.now() - steadyT0; }
   }
 
   el.textContent = text; cur.remove();
   const dt = (performance.now() - t0) / 1000;
   const tps = count / dt;
-  setStatus(`${count} tokens in ${dt.toFixed(2)}s = ${tps.toFixed(0)} tok/s `
-          + `= ${(tps * LM.macsPerToken() / 1e9).toFixed(2)} GMAC/s | `
-          + `context window ${LM.contextUsed}/${LM.cap} tokens, absolute position `
-          + `${LM.pos} | plain JavaScript, single thread`, "ok");
+  const engine = (LM === WLM) ? "WASM+SIMD" + (LM.useI8 ? " int8" : " f32")
+                              + (LM.fused ? " fused-attn" : "") : "plain JS";
+  // Steady-state matters: attention cost scales with how full the ring is, so a
+  // 2048-token run is legitimately slower per token than a 600-token one. Report
+  // both or the numbers are not comparable between runs.
+  const steady = steadyCount > 0 ? steadyCount / (steadyMs / 1000) : tps;
+  setStatus(`${count} tokens in ${dt.toFixed(2)}s | avg ${tps.toFixed(0)} tok/s`
+          + ` | steady ${steady.toFixed(0)} tok/s (full 256 window)`
+          + ` = ${(steady * LM.macsPerToken() / 1e9).toFixed(2)} GMAC/s`
+          + ` | ${engine} | ctx ${LM.contextUsed}/${LM.cap}, pos ${LM.pos}`, "ok");
   running = false; $("go").disabled = false; $("stop").disabled = true;
 }
 
@@ -442,6 +451,11 @@ function look() {
 }
 
 function profile() {
+  $("proftab").innerHTML = "<p><strong>profiling, a few seconds...</strong></p>";
+  setTimeout(profileRun, 30);
+}
+
+function profileRun() {
   if (!WLM || !WLM.K) { $("proftab").innerHTML = "<p>WASM engine not active.</p>"; return; }
   const K = WLM.K, L = WLM, D = L.d, F = L.ffn, V = L.vocab, hd = L.hd, cap = L.cap;
   const P = o => o * 4;
@@ -507,7 +521,8 @@ function profile() {
         + `<p style="font-size:.85rem;color:var(--ink-soft);margin:.7rem 0 0">`
         + `${(1000/realMs).toFixed(0)} tok/s implied. Anything unaccounted is JS call `
         + `overhead, copyWithin, or sampling.</p>`;
-  $("proftab").innerHTML = html;
+  $("proftab").innerHTML = "<h2>Where the time goes</h2>" + html;
+  $("proftab").scrollIntoView({ behavior: "smooth", block: "start" });
   L.reset();
 }
 
