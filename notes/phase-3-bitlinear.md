@@ -221,3 +221,52 @@ figure gets quoted as file size, where it is not.
 One correction to that framing in our favour of accuracy: the tied LM head *is* a
 real matmul (d x V per token) and stays full precision -- 12% of MACs for us,
 15% for BitNet. So "no multipliers" is ~88%, not 100%.
+
+
+## Quantizing the embedding table too (not a step the paper takes)
+
+All variants evaluated on **identical fixed batches** (seed 1337, 60 x 32 x 256),
+so differences are precision and not eval noise. Applied post-hoc to the trained
+QAT-ternary model. `embed` and `head` are tied, so one change quantizes both the
+input lookup and the output projection.
+
+| embedding precision | val | delta | ppl | packed MB | fp share | compression |
+|---|---|---|---|---|---|---|
+| fp16 (baseline) | 2.1789 | +0.0000 | 8.8 | 4.61 | 57.7% | 4.85x |
+| **int8** | **2.1795** | **+0.0006** | **8.8** | **3.28** | **40.6%** | **6.81x** |
+| int4 | 2.3650 | +0.1861 | 10.6 | 2.61 | 25.4% | 8.54x |
+| ternary | 2.7385 | +0.5596 | 15.5 | 2.21 | 11.9% | 10.10x |
+
+### int8 embeddings are free
+
++0.0006 nats is 0.03% -- noise. Packed size drops 4.61 -> 3.28 MB, the
+full-precision share falls 57.7% -> 40.6%, and compression against fp16 goes
+4.85x -> 6.81x. No training, no measurable quality cost.
+
+### The embedding is more precision-sensitive per parameter than the body
+
+```
+ternarizing 9,830,400 body weights  : +0.1207 nats
+int4 on 1,328,960 embedding weights : +0.1861 nats
+```
+
+Seven times fewer weights, a much milder quantization, and a *larger* penalty.
+This is the quantitative reason the embedding gets excluded -- not a convention,
+a measured asymmetry.
+
+### Correction: ternary embeddings degrade, they do not collapse
+
+The claim "ternarize the embedding and the model collapses into noise" is
+commonly stated (including repeatedly in this project's own earlier notes) and is
+**too strong**. Measured: +0.5596 nats, ppl 8.8 -> 15.5. That is 76% worse
+perplexity and 4.6x the cost of int8 -- bad, but for scale, PTQ on the body gave
+ppl 151.9 and the unigram floor is 419. A ternary-embedding model still works.
+
+The rule is real. Its usual statement is not.
+
+### Open follow-up
+
+The above is **PTQ on the embedding** -- quantizing a table that was trained in
+fp32. On the body, PTQ vs QAT was worth 2.85 nats. So a model *trained* with
+ternary embeddings could plausibly recover most of that 0.5596. If it does:
+fp share 11.9%, packed 2.21 MB, 10.1x compression against fp16. Untested.
