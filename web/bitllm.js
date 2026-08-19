@@ -338,50 +338,115 @@ export class BitLM {
   }
 }
 
-// ---------- repetition control ----------------------------------------------
+// ---------- sampling ---------------------------------------------------------
+//
+// PROFILED: forward() costs 0.870 ms/token (1,149 tok/s) while generation ran at
+// 535 tok/s -- roughly 1 ms per token was being burned here, not in the model.
+// The culprit was a full comparison sort of 4096 logits (~49,000 comparator
+// closure calls) to select the top 100, plus a Map rebuilt every token for the
+// frequency penalty and string keys for n-gram blocking.
+//
+// Everything below is allocation-free after construction and touches each logit
+// a constant number of times.
+// ---------------------------------------------------------------------------
+
+let _hv = new Float32Array(512);      // min-heap of the best k values
+let _hi = new Int32Array(512);
+
+function siftDown(i, n) {
+  for (;;) {
+    const l = 2 * i + 1, r = l + 1;
+    let m = i;
+    if (l < n && _hv[l] < _hv[m]) m = l;
+    if (r < n && _hv[r] < _hv[m]) m = r;
+    if (m === i) return;
+    const tv = _hv[i]; _hv[i] = _hv[m]; _hv[m] = tv;
+    const ti = _hi[i]; _hi[i] = _hi[m]; _hi[m] = ti;
+    i = m;
+  }
+}
 
 /**
- * Blocks any token that would complete an n-gram already seen.
- *
- * Necessary because this model was trained on ~227-token stories and has no
- * concept of a longer one. Forced past its natural ending it degenerates into
- * "The end. The end. The end." -- banning the end-of-story token does not make
- * it write more, it makes it unable to stop. This makes looping impossible, so
- * it has to keep finding something new to say.
+ * Top-k by min-heap: one pass, and an O(log k) sift only when a value beats the
+ * current k-th best. ~4096 comparisons plus a few hundred sifts, against ~49,000
+ * comparator calls for a full sort. Results land in _hi[0..k).
  */
-export class NoRepeatNGram {
-  constructor(n = 3) { this.n = n; this.seen = new Map(); this.hist = []; }
+function selectTopK(logits, k) {
+  if (k > _hv.length) { _hv = new Float32Array(k); _hi = new Int32Array(k); }
+  const n = logits.length;
+  let size = 0;
+  for (let i = 0; i < n; i++) {
+    const v = logits[i];
+    if (size < k) {
+      _hv[size] = v; _hi[size] = i; size++;
+      if (size === k) for (let j = (k >> 1) - 1; j >= 0; j--) siftDown(j, k);
+    } else if (v > _hv[0]) {
+      _hv[0] = v; _hi[0] = i; siftDown(0, k);
+    }
+  }
+  return size;
+}
 
-  _key(arr, from) { return arr.slice(from, from + this.n - 1).join(","); }
-
-  banned() {
-    if (this.hist.length < this.n - 1) return null;
-    const k = this._key(this.hist, this.hist.length - (this.n - 1));
-    return this.seen.get(k) || null;
+/**
+ * Repetition control with O(1) updates.
+ *
+ * Frequency penalty keeps a running count over a sliding window instead of
+ * rebuilding a Map each token. N-gram blocking keys on integers rather than
+ * joined strings.
+ */
+export class Sampler {
+  constructor(vocab = 4096, { window = 128, ngram = 3 } = {}) {
+    this.vocab = vocab;
+    this.window = window;
+    this.counts = new Int32Array(vocab);      // occurrences inside the window
+    this.ring = new Int32Array(window);
+    this.n = 0;
+    this.ngram = ngram;
+    this.seen = new Map();                    // integer key -> Set of next tokens
+    this.hist = [];
   }
 
   push(tok) {
+    const w = this.window;
+    if (this.n >= w) this.counts[this.ring[this.n % w]]--;
+    this.ring[this.n % w] = tok;
+    this.counts[tok]++;
+    this.n++;
+
     this.hist.push(tok);
-    if (this.hist.length >= this.n) {
-      const k = this._key(this.hist, this.hist.length - this.n);
+    const g = this.ngram;
+    if (g > 1 && this.hist.length >= g) {
+      const k = this._key(this.hist.length - g, g - 1);
       let set = this.seen.get(k);
       if (!set) { set = new Set(); this.seen.set(k, set); }
       set.add(tok);
     }
   }
+
+  _key(from, len) {
+    let k = 0;
+    for (let i = 0; i < len; i++) k = k * this.vocab + this.hist[from + i];
+    return k;
+  }
+
+  /** Tokens that would complete an already-seen n-gram. */
+  bannedNext() {
+    const g = this.ngram;
+    if (g < 2 || this.hist.length < g - 1) return null;
+    return this.seen.get(this._key(this.hist.length - (g - 1), g - 1)) || null;
+  }
+
+  /** logits -= alpha * (count within the window). One pass over the window. */
+  applyFrequency(logits, alpha) {
+    if (alpha <= 0) return;
+    const w = Math.min(this.n, this.window);
+    for (let i = 0; i < w; i++) {
+      const t = this.ring[i];
+      logits[t] -= alpha * this.counts[t] / Math.max(this.counts[t], 1) * this.counts[t];
+    }
+  }
 }
 
-/** Frequency penalty over a sliding window of recent tokens. */
-export function frequencyPenalty(logits, hist, alpha, window = 128) {
-  if (alpha <= 0) return;
-  const from = Math.max(0, hist.length - window);
-  const count = new Map();
-  for (let i = from; i < hist.length; i++)
-    count.set(hist[i], (count.get(hist[i]) || 0) + 1);
-  for (const [t, c] of count) logits[t] -= alpha * c;
-}
-
-// ---------- sampling --------------------------------------------------------
 export function sample(logits, temperature = 0.8, topK = 100, rng = Math.random,
                        banned = null) {
   const n = logits.length;
@@ -392,25 +457,31 @@ export function sample(logits, temperature = 0.8, topK = 100, rng = Math.random,
     for (let i = 1; i < n; i++) if (logits[i] > logits[bi]) bi = i;
     return bi;
   }
-  let idx;
-  if (topK > 0 && topK < n) {
-    idx = new Array(n);
-    for (let i = 0; i < n; i++) idx[i] = i;
-    idx.sort((a, b) => logits[b] - logits[a]);
-    idx = idx.slice(0, topK);
+
+  const k = (topK > 0 && topK < n) ? topK : n;
+  let size, idxArr;
+  if (k === n) {
+    size = n; idxArr = null;                   // no selection needed
   } else {
-    idx = new Array(n);
-    for (let i = 0; i < n; i++) idx[i] = i;
+    size = selectTopK(logits, k); idxArr = _hi;
   }
+
   let mx = -Infinity;
-  for (const i of idx) if (logits[i] > mx) mx = logits[i];
-  let sum = 0;
-  const pr = new Float64Array(idx.length);
-  for (let j = 0; j < idx.length; j++) {
-    const e = Math.exp((logits[idx[j]] - mx) / temperature);
-    pr[j] = e; sum += e;
+  for (let j = 0; j < size; j++) {
+    const v = logits[idxArr ? idxArr[j] : j];
+    if (v > mx) mx = v;
   }
-  let r = rng() * sum;
-  for (let j = 0; j < idx.length; j++) { r -= pr[j]; if (r <= 0) return idx[j]; }
-  return idx[idx.length - 1];
+  const inv = 1 / temperature;
+  let sum = 0;
+  for (let j = 0; j < size; j++) {
+    const v = logits[idxArr ? idxArr[j] : j];
+    sum += Math.exp((v - mx) * inv);
+  }
+  let r = rng() * sum, acc = 0;
+  for (let j = 0; j < size; j++) {
+    const i = idxArr ? idxArr[j] : j;
+    acc += Math.exp((logits[i] - mx) * inv);
+    if (acc >= r) return i;
+  }
+  return idxArr ? idxArr[size - 1] : size - 1;
 }

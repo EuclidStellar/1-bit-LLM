@@ -218,8 +218,7 @@ server, no API key, no round trip.</p>
 </div>
 
 <script type="module">
-import { loadModel, BitLM, sample, NoRepeatNGram, frequencyPenalty }
-  from "./bitllm.js";
+import { loadModel, BitLM, sample, Sampler } from "./bitllm.js";
 import { Tokenizer } from "./tokenizer.js";
 import { Heap, heapFloatsFor } from "./heap.js";
 import { loadKernel, WasmBitLM } from "./wasmlm.js";
@@ -360,9 +359,8 @@ async function generate() {
   const banEot = (single && eot >= 0) ? [eot] : null;
   const alpha = +$("freq").value;
   const ngN = +$("ngram").value;
-  const ng = ngN > 0 ? new NoRepeatNGram(ngN) : null;
-  const hist = [];
-  for (const id of ids) { hist.push(id); if (ng) ng.push(id); }
+  const SMP = new Sampler(4096, { window: 128, ngram: ngN > 0 ? ngN : 1 });
+  for (const id of ids) SMP.push(id);
   const SEP = "\n\n\u00b7 \u00b7 \u00b7\n\n";
 
   LM.reset();
@@ -380,15 +378,19 @@ async function generate() {
   let lastPaint = t0;
 
   for (let i = 0; i < n && !stopFlag; i++) {
-    frequencyPenalty(logits, hist, alpha);
-    let ban = banEot;
-    if (ng) {
-      const b = ng.banned();
-      if (b && b.size) ban = banEot ? [...banEot, ...b] : [...b];
+    if (alpha > 0) {
+      // O(window) with running counts, not a Map rebuilt every token
+      const w = Math.min(SMP.n, SMP.window);
+      for (let j = 0; j < w; j++) {
+        const tk = SMP.ring[j];
+        logits[tk] -= alpha * SMP.counts[tk];
+      }
     }
+    let ban = banEot;
+    const nb = ngN > 0 ? SMP.bannedNext() : null;
+    if (nb && nb.size) ban = banEot ? [...banEot, ...nb] : [...nb];
     const next = sample(logits, temp, topk, rng, ban);
-    hist.push(next);
-    if (ng) ng.push(next);
+    SMP.push(next);
     count++;
 
     // incremental render -- decoding the whole history every token is O(n^2)
