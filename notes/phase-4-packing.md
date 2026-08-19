@@ -5,21 +5,36 @@ translates into speed on real hardware.
 
 ## The packed file
 
+**FINAL** (norms at fp32; see the fidelity section for why):
+
 ```
 packing scheme            base 3, five ternary weights per uint8 (3^5 = 243 <= 255)
 bits per ternary weight   1.6000        floor log2(3) = 1.5850 -> 99.1% efficient
 packed tensors            49            48 BitLinear + the tied embedding
 ternary weights           11,141,120
-fp16 weights              18,240        the 41 RMSNorm vectors, nothing else
+fp32 weights                  18,240    the 41 RMSNorm vectors, nothing else
 
-blob                       2,264,704 B   <- predicted to the byte
-header (JSON)                 11,820 B
-TOTAL                      2,276,524 B  = 2.277 MB
+blob                       2,301,184 B   <- predicted to the byte
+header (JSON)                 12,021 B
+TOTAL                      2,313,205 B  = 2.313 MB
 
 fp32 training checkpoint      44.67 MB
 same model at fp16            22.32 MB
-compression vs fp16            9.80x
+compression vs fp16            9.65x
 ```
+
+Fidelity, final:
+
+```
+val loss   packed 2.315797   source 2.315795      difference 2e-6 nats
+max logit delta, act quant OFF   1.144e-05        fp32 accumulation noise
+```
+
+The intermediate fp16-norms build measured 2,276,524 B / 9.80x compression but
+deviated 4.025e-03 in logits. fp32 norms cost 36,480 bytes (+1.6% of the file)
+and improved fidelity **352x**. Worth it: the norms are 0.16% of parameters, and
+"numerically exact packed inference" is a materially stronger claim than
+"matches to 4e-3".
 
 Loss is preserved: **packed 2.315807 vs original 2.315795**, a difference of
 1.2e-5 nats. The packed file stores `states` and one fp32 `scale` per tensor, and

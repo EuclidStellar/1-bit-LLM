@@ -1,6 +1,6 @@
 # Resume here
 
-**Phases 1, 2 and 3 complete.** The core experimental result is done and
+**Phases 1-4 complete. Project A is done.** The core experimental result is done and
 published. What remains is ablations, packed inference, and writing it up.
 
 ## Everything is durable
@@ -12,6 +12,7 @@ published. What remains is ablations, packed inference, and writing it up.
 | QAT-ternary checkpoint | HF `.../qat_ternary.pt` |
 | equal-memory comparison model | HF `.../fp16_d128.pt` |
 | every number + exact recipe | HF `.../results.json` |
+| **the 1-bit model itself** | HF `.../model_packed.bin` -- **2.313 MB** |
 | code + findings | github.com/EuclidStellar/1-bit-LLM |
 
 Checkpoints hold **fp32 master weights** (44.7 MB). Ternary quantization happens
@@ -123,3 +124,67 @@ bytes on disk and tokens/sec.
    published "Memory (Non-emb) 0.4GB" reproduces exactly from their config.json
 7. The ~31% ternary zero fraction is derivable in closed form for Gaussian weights
 8. `importlib.invalidate_caches()` after cloning a repo inside a notebook
+
+
+---
+
+# PROJECT A IS COMPLETE (2026-08-20)
+
+## The deliverable
+
+`euclidstellar/tinystories-1bit-llm/model_packed.bin` -- **2,313,205 bytes**
+
+```
+11,141,120 ternary weights at 1.6 bits/weight   (99.1% of the log2(3) floor)
+    18,240 fp32 norm parameters
+        49 packed tensors: 48 BitLinear + the tied embedding
+9.65x smaller than the same model at fp16 (22.32 MB)
+19.3x smaller than the fp32 training checkpoint (44.67 MB)
+numerically exact: loss 2.315797 vs source 2.315795
+```
+
+## Every result
+
+| | val loss | ppl | size |
+|---|---|---|---|
+| uniform baseline | 8.3178 | 4096 | -- |
+| unigram baseline | 6.0380 | 419 | -- |
+| PTQ-ternary | 5.0229 | 151.9 | -- |
+| fp16 d=128 (equal memory) | 2.3607 | 10.6 | 4.21 MB |
+| **QAT ternary + ternary embed** | **2.3107** | **10.1** | **2.31 MB** |
+| QAT-ternary, fp16 embed | 2.1760 | 8.8 | 4.61 MB |
+| fp32 control | 2.0553 | 7.8 | 22.32 MB |
+
+```
+QAT vs PTQ, body           2.85 nats from WHEN the quantizer runs, nothing else
+QAT vs PTQ, embedding      76.0% of 0.5596 nats recovered
+equal parameter count      ternary loses 0.1207 nats
+equal memory budget        ternary wins ~0.17-0.23 nats across a 2x range
+speed on a T4              1.7x SLOWER, and 96.9% of that is activation quant
+```
+
+## What is left: Phase 8, packaging
+
+1. **HF model card** -- architecture, the Pareto table, the three-arm comparison,
+   the honest speed result, limitations (under-trained at 1.79 tokens/param,
+   entity tracking fails, TinyStories domain only)
+2. **Gradio Space** loading `model_packed.bin` -- 2.31 MB loads instantly
+3. **Blog post** from `notes/` -- eight findings are already written up
+4. Optional: measure the fair equal-memory point (`d=136, n_head=4`,
+   2,340,424 params at 4.68 MB) instead of interpolating it
+
+## Project B, separate, if you want a GOOD model
+
+Quantization is not the bottleneck -- training is. The fp32 control at 2.0553 is
+itself bad (repeats "machine" eight times, loses entity identity). Levers, ranked:
+
+| lever | cost per arm | tokens/param |
+|---|---|---|
+| 100M tokens | 76 min | 9.0 |
+| 223M tokens | 2.8 h | 20 (Chinchilla) |
+| 477M tokens (full corpus) | 6.1 h | 42.7 |
+| context 256 -> 512 | ~1.4x on top | -- (**you trained at 256; design said 512**) |
+| depth 8 -> 16 layers | ~1.8x on top | -- (also takes fp share 57.7% -> 40.9%) |
+
+Recorded prediction to check: depth contributed only 0.042 nats/M at 1.79
+tokens/param, worst on the ladder. Its share should grow with data.
