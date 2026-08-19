@@ -153,7 +153,9 @@ server, no API key, no round trip.</p>
   <div style="display:flex;gap:.6rem;flex-wrap:wrap">
     <button id="go" disabled>Generate</button>
     <button id="stop" class="ghost" disabled>Stop</button>
+    <button id="prof" class="ghost" disabled>Profile</button>
   </div>
+  <div id="proftab"></div>
 </div>
 
 <div id="out"></div>
@@ -332,7 +334,7 @@ async function boot() {
     $("engine").addEventListener("change", e => {
       LM = e.target.value === "wasm" && WLM ? WLM : JSLM;
     });
-    $("go").disabled = false; $("look").disabled = false;
+    $("go").disabled = false; $("look").disabled = false; $("prof").disabled = false;
     $("bar").style.width = "100%";
   } catch (e) {
     setStatus("failed to load: " + e.message, "bad");
@@ -439,6 +441,77 @@ function look() {
     + `analytically 31.01% &mdash; training barely moves it.</p>`;
 }
 
+function profile() {
+  if (!WLM || !WLM.K) { $("proftab").innerHTML = "<p>WASM engine not active.</p>"; return; }
+  const K = WLM.K, L = WLM, D = L.d, F = L.ffn, V = L.vocab, hd = L.hd, cap = L.cap;
+  const P = o => o * 4;
+  const I = L.I, SC = L.SC, O = L.O;
+  const mv = (name, src, dst, outF, inF) => L.useI8
+      ? () => K.matvec_i8(P(src), I[name], P(dst), outF, inF, SC[name])
+      : () => K.matvec(P(src), P(O[name]), P(dst), outF, inF);
+
+  // warm the ring so attention sees a full window
+  L.reset();
+  for (let i = 0; i < cap; i++) L.forward(1 + (i % 100));
+
+  const bench = (fn, iters) => {
+    for (let i = 0; i < 20; i++) fn();
+    const t0 = performance.now();
+    for (let i = 0; i < iters; i++) fn();
+    return (performance.now() - t0) / iters;      // ms per call
+  };
+
+  const rows = [
+    ["matvec 320x320  (q,k,v,o)", mv("blocks.0.q.weight", L.oQD, L.oQ, D, D), 32, 32*D*D],
+    ["matvec 1280x320 (up)",      mv("blocks.0.up.weight", L.oQD, L.oU, F, D), 8, 8*F*D],
+    ["matvec 320x1280 (down)",    mv("blocks.0.down.weight", L.oQF, L.oY, D, F), 8, 8*D*F],
+    ["matvec 4096x320 (head)",    mv("embed.weight", L.oH, L.oLog, V, D), 1, V*D],
+    ["attn_head (per head)",
+      () => K.attn_head(P(L.oQ), P(L.oKC[0]), P(L.oVC[0]), P(L.oAtt), P(L.oSc),
+                        cap, D, 0, hd, 1/Math.sqrt(hd)), 64, 64*cap*hd*2],
+    ["rmsnorm 320",  () => K.rmsnorm(P(L.oX), P(O["final_norm.weight"]), P(L.oH), D, 1e-6), 25, 0],
+    ["act_quant 320", () => K.act_quant(P(L.oH), P(L.oQD), D), 24, 0],
+    ["act_quant 1280", () => K.act_quant(P(L.oU), P(L.oQF), F), 8, 0],
+    ["add_inplace 320", () => K.add_inplace(P(L.oX), P(L.oY), D), 16, 0],
+    ["relu2 1280", () => K.relu2(P(L.oU), F), 8, 0],
+    ["_rope (JS)", () => { L._ropeTables(7); L._rope(L.vQ); }, 16, 0],
+  ];
+
+  let html = '<table><tr><th>operation</th><th>ms/call</th><th>calls/token</th>'
+           + '<th>ms/token</th><th>share</th><th>GMAC/s</th></tr>';
+  const timed = rows.map(([label, fn, n, macs]) => {
+    const ms = bench(fn, Math.max(40, Math.round(60 / Math.max(n, 1)) * 20));
+    return { label, ms, n, macs, total: ms * n };
+  });
+  const sum = timed.reduce((a, r) => a + r.total, 0);
+
+  // measured end-to-end for comparison
+  L.reset();
+  for (let i = 0; i < 30; i++) L.forward(5);
+  const t0 = performance.now();
+  for (let i = 0; i < 120; i++) L.forward(5);
+  const realMs = (performance.now() - t0) / 120;
+
+  for (const r of timed)
+    html += `<tr><td>${r.label}</td><td class="n">${r.ms.toFixed(4)}</td>`
+          + `<td class="n">${r.n}</td><td class="n">${r.total.toFixed(3)}</td>`
+          + `<td class="n">${(r.total/sum*100).toFixed(1)}%</td>`
+          + `<td class="n">${r.macs ? (r.macs/r.total/1e6).toFixed(2) : "&mdash;"}</td></tr>`;
+  html += `<tr><td><strong>modelled total</strong></td><td class="n"></td><td class="n"></td>`
+        + `<td class="n"><strong>${sum.toFixed(3)}</strong></td><td class="n">100%</td>`
+        + `<td class="n">${(11141120/sum/1e6).toFixed(2)}</td></tr>`
+        + `<tr><td><strong>measured forward()</strong></td><td class="n"></td><td class="n"></td>`
+        + `<td class="n"><strong>${realMs.toFixed(3)}</strong></td>`
+        + `<td class="n">${(sum/realMs*100).toFixed(0)}% accounted</td>`
+        + `<td class="n">${(11141120/realMs/1e6).toFixed(2)}</td></tr></table>`
+        + `<p style="font-size:.85rem;color:var(--ink-soft);margin:.7rem 0 0">`
+        + `${(1000/realMs).toFixed(0)} tok/s implied. Anything unaccounted is JS call `
+        + `overhead, copyWithin, or sampling.</p>`;
+  $("proftab").innerHTML = html;
+  L.reset();
+}
+
+$("prof").addEventListener("click", profile);
 $("go").addEventListener("click", generate);
 $("stop").addEventListener("click", () => { stopFlag = true; });
 $("look").addEventListener("click", look);

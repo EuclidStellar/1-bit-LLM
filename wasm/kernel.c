@@ -19,6 +19,16 @@
 
 #define EXPORT(name) __attribute__((export_name(name)))
 
+// Base SIMD128 has no fused multiply-add: a dot product costs one f32x4_mul plus
+// one f32x4_add per 4 MACs. Relaxed SIMD adds f32x4_relaxed_madd, halving the
+// instruction count. Not all browsers enable it, so this is built twice and the
+// page picks whichever instantiates.
+#ifdef USE_RELAXED
+#define FMA(acc, a, b) wasm_f32x4_relaxed_madd((a), (b), (acc))
+#else
+#define FMA(acc, a, b) wasm_f32x4_add((acc), wasm_f32x4_mul((a), (b)))
+#endif
+
 // Rounding without libm. Built with -nostdlib, so __builtin_roundf emits a call
 // to roundf that never resolves. WASM has f32x4.nearest as a real instruction,
 // so splat-round-extract costs nothing and links cleanly.
@@ -45,26 +55,17 @@ void matvec(const float *x, const float *W, float *y, int outF, int inF) {
     v128_t a6 = wasm_f32x4_splat(0.0f), a7 = wasm_f32x4_splat(0.0f);
     int i = 0;
     for (; i + 32 <= inF; i += 32) {
-      a0 = wasm_f32x4_add(a0, wasm_f32x4_mul(wasm_v128_load(x + i),
-                                             wasm_v128_load(w + i)));
-      a1 = wasm_f32x4_add(a1, wasm_f32x4_mul(wasm_v128_load(x + i + 4),
-                                             wasm_v128_load(w + i + 4)));
-      a2 = wasm_f32x4_add(a2, wasm_f32x4_mul(wasm_v128_load(x + i + 8),
-                                             wasm_v128_load(w + i + 8)));
-      a3 = wasm_f32x4_add(a3, wasm_f32x4_mul(wasm_v128_load(x + i + 12),
-                                             wasm_v128_load(w + i + 12)));
-      a4 = wasm_f32x4_add(a4, wasm_f32x4_mul(wasm_v128_load(x + i + 16),
-                                             wasm_v128_load(w + i + 16)));
-      a5 = wasm_f32x4_add(a5, wasm_f32x4_mul(wasm_v128_load(x + i + 20),
-                                             wasm_v128_load(w + i + 20)));
-      a6 = wasm_f32x4_add(a6, wasm_f32x4_mul(wasm_v128_load(x + i + 24),
-                                             wasm_v128_load(w + i + 24)));
-      a7 = wasm_f32x4_add(a7, wasm_f32x4_mul(wasm_v128_load(x + i + 28),
-                                             wasm_v128_load(w + i + 28)));
+      a0 = FMA(a0, wasm_v128_load(x + i), wasm_v128_load(w + i));
+      a1 = FMA(a1, wasm_v128_load(x + i + 4), wasm_v128_load(w + i + 4));
+      a2 = FMA(a2, wasm_v128_load(x + i + 8), wasm_v128_load(w + i + 8));
+      a3 = FMA(a3, wasm_v128_load(x + i + 12), wasm_v128_load(w + i + 12));
+      a4 = FMA(a4, wasm_v128_load(x + i + 16), wasm_v128_load(w + i + 16));
+      a5 = FMA(a5, wasm_v128_load(x + i + 20), wasm_v128_load(w + i + 20));
+      a6 = FMA(a6, wasm_v128_load(x + i + 24), wasm_v128_load(w + i + 24));
+      a7 = FMA(a7, wasm_v128_load(x + i + 28), wasm_v128_load(w + i + 28));
     }
     for (; i + 4 <= inF; i += 4)
-      a0 = wasm_f32x4_add(a0, wasm_f32x4_mul(wasm_v128_load(x + i),
-                                             wasm_v128_load(w + i)));
+      a0 = FMA(a0, wasm_v128_load(x + i), wasm_v128_load(w + i));
     v128_t a = wasm_f32x4_add(wasm_f32x4_add(wasm_f32x4_add(a0, a1),
                                              wasm_f32x4_add(a2, a3)),
                               wasm_f32x4_add(wasm_f32x4_add(a4, a5),
@@ -83,8 +84,8 @@ void rmsnorm(const float *x, const float *w, float *out, int n, float eps) {
   int i = 0;
   for (; i + 8 <= n; i += 8) {
     v128_t p = wasm_v128_load(x + i), q = wasm_v128_load(x + i + 4);
-    s0 = wasm_f32x4_add(s0, wasm_f32x4_mul(p, p));
-    s1 = wasm_f32x4_add(s1, wasm_f32x4_mul(q, q));
+    s0 = FMA(s0, p, p);
+    s1 = FMA(s1, q, q);
   }
   v128_t sv = wasm_f32x4_add(s0, s1);
   float ss = wasm_f32x4_extract_lane(sv, 0) + wasm_f32x4_extract_lane(sv, 1)
@@ -149,10 +150,8 @@ void attn_scores(const float *q, const float *kc, float *scores,
     v128_t a0 = wasm_f32x4_splat(0.0f), a1 = wasm_f32x4_splat(0.0f);
     int i = 0;
     for (; i + 8 <= hd; i += 8) {
-      a0 = wasm_f32x4_add(a0, wasm_f32x4_mul(wasm_v128_load(qq + i),
-                                             wasm_v128_load(k + i)));
-      a1 = wasm_f32x4_add(a1, wasm_f32x4_mul(wasm_v128_load(qq + i + 4),
-                                             wasm_v128_load(k + i + 4)));
+      a0 = FMA(a0, wasm_v128_load(qq + i), wasm_v128_load(k + i));
+      a1 = FMA(a1, wasm_v128_load(qq + i + 4), wasm_v128_load(k + i + 4));
     }
     v128_t a = wasm_f32x4_add(a0, a1);
     float s = wasm_f32x4_extract_lane(a, 0) + wasm_f32x4_extract_lane(a, 1)
@@ -251,10 +250,8 @@ void attn_head(const float *q, const float *kc, const float *vc, float *out,
     v128_t a0 = wasm_f32x4_splat(0.0f), a1 = wasm_f32x4_splat(0.0f);
     int i = 0;
     for (; i + 8 <= hd; i += 8) {
-      a0 = wasm_f32x4_add(a0, wasm_f32x4_mul(wasm_v128_load(qq + i),
-                                             wasm_v128_load(k + i)));
-      a1 = wasm_f32x4_add(a1, wasm_f32x4_mul(wasm_v128_load(qq + i + 4),
-                                             wasm_v128_load(k + i + 4)));
+      a0 = FMA(a0, wasm_v128_load(qq + i), wasm_v128_load(k + i));
+      a1 = FMA(a1, wasm_v128_load(qq + i + 4), wasm_v128_load(k + i + 4));
     }
     v128_t a = wasm_f32x4_add(a0, a1);
     float d = wasm_f32x4_extract_lane(a, 0) + wasm_f32x4_extract_lane(a, 1)
@@ -308,10 +305,10 @@ void matvec_i8(const float *x, const signed char *W, float *y,
       v128_t s1 = wasm_f32x4_convert_i32x4(wasm_i32x4_extend_high_i16x8(lo8));
       v128_t s2 = wasm_f32x4_convert_i32x4(wasm_i32x4_extend_low_i16x8(hi8));
       v128_t s3 = wasm_f32x4_convert_i32x4(wasm_i32x4_extend_high_i16x8(hi8));
-      a0 = wasm_f32x4_add(a0, wasm_f32x4_mul(wasm_v128_load(x + i),      s0));
-      a1 = wasm_f32x4_add(a1, wasm_f32x4_mul(wasm_v128_load(x + i + 4),  s1));
-      a2 = wasm_f32x4_add(a2, wasm_f32x4_mul(wasm_v128_load(x + i + 8),  s2));
-      a3 = wasm_f32x4_add(a3, wasm_f32x4_mul(wasm_v128_load(x + i + 12), s3));
+      a0 = FMA(a0, wasm_v128_load(x + i), s0);
+      a1 = FMA(a1, wasm_v128_load(x + i + 4), s1);
+      a2 = FMA(a2, wasm_v128_load(x + i + 8), s2);
+      a3 = FMA(a3, wasm_v128_load(x + i + 12), s3);
     }
     v128_t a = wasm_f32x4_add(wasm_f32x4_add(a0, a1), wasm_f32x4_add(a2, a3));
     float acc = wasm_f32x4_extract_lane(a, 0) + wasm_f32x4_extract_lane(a, 1)
