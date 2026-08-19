@@ -10,7 +10,8 @@ __all__ = ["LM", "Block", "BitLinear", "RMSNorm", "apply_rope",
 
 from .pack import (save_packed, load_packed, load_packed_model, pack_base3,
                    unpack_base3, ternary_states, ternary_matmul_masked,
-                   ternary_matmul_explicit, inference_config)
+                   ternary_matmul_explicit, inference_config,
+                   selftest, selftest_file)
 __all__ += ["save_packed", "load_packed", "load_packed_model", "pack_base3",
             "unpack_base3", "ternary_states", "ternary_matmul_masked",
-            "ternary_matmul_explicit", "inference_config"]
+            "ternary_matmul_explicit", "inference_config", "selftest", "selftest_file"]
