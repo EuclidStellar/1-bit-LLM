@@ -221,7 +221,7 @@ server, no API key, no round trip.</p>
 import { loadModel, BitLM, sample, Sampler } from "./bitllm.js";
 import { Tokenizer } from "./tokenizer.js";
 import { Heap, heapFloatsFor } from "./heap.js";
-import { loadKernel, WasmBitLM } from "./wasmlm.js";
+import { loadBestKernel, WasmBitLM } from "./wasmlm.js";
 
 const HF = "https://huggingface.co/euclidstellar/tinystories-1bit-llm/resolve/main/";
 const DATA = "https://huggingface.co/datasets/euclidstellar/tinystories-bpe4096/resolve/main/";
@@ -230,7 +230,7 @@ const $ = id => document.getElementById(id);
 const setStatus = (t, cls = "") => { $("status").textContent = t; $("status").className = "status " + cls; };
 const fmt = n => n.toLocaleString("en-US");
 
-let MODEL, LM, JSLM, WLM, TOK, HEAP, running = false, stopFlag = false;
+let MODEL, LM, JSLM, WLM, TOK, HEAP, KNAME = "", running = false, stopFlag = false;
 
 // deterministic RNG so a given seed reproduces a given story
 function mulberry(a) {
@@ -251,11 +251,14 @@ async function boot() {
     // the same bytes, so comparing their logits is a real test.
     HEAP = new Heap(heapFloatsFor({}));
 
-    let K = null, kbytes = 0;
+    let K = null, kbytes = 0, kname = "";
     try {
       setStatus("loading SIMD kernel...");
-      const k = await loadKernel(HF + "kernel.wasm", HEAP);
-      K = k.K; kbytes = k.size;
+      // relaxed SIMD first: f32x4_relaxed_madd halves the dot-product
+      // instruction count where the browser supports it
+      const k = await loadBestKernel([HF + "kernel_relaxed.wasm",
+                                      HF + "kernel.wasm"], HEAP);
+      K = k.K; kbytes = k.size; kname = k.url.split("/").pop(); KNAME = kname;
     } catch (e) {
       console.warn("no WASM kernel:", e.message);
       HEAP.setBase(0);                       // keep the JS-only floor
@@ -386,10 +389,12 @@ async function generate() {
         logits[tk] -= alpha * SMP.counts[tk];
       }
     }
-    let ban = banEot;
+    // apply bans in place; spreading a Set into a fresh array every token was
+    // ~4,000 allocations per 4096-token run for no reason
+    if (banEot) logits[eot] = -Infinity;
     const nb = ngN > 0 ? SMP.bannedNext() : null;
-    if (nb && nb.size) ban = banEot ? [...banEot, ...nb] : [...nb];
-    const next = sample(logits, temp, topk, rng, ban);
+    if (nb) for (const b of nb) logits[b] = -Infinity;
+    const next = sample(logits, temp, topk, rng, null);
     SMP.push(next);
     count++;
 
@@ -413,7 +418,9 @@ async function generate() {
   el.textContent = text; cur.remove();
   const dt = (performance.now() - t0) / 1000;
   const tps = count / dt;
-  const engine = (LM === WLM) ? "WASM+SIMD" + (LM.useI8 ? " int8" : " f32")
+  const engine = (LM === WLM) ? (KNAME.includes("relaxed") ? "WASM+relaxedSIMD"
+                                                            : "WASM+SIMD")
+                              + (LM.useI8 ? " int8" : " f32")
                               + (LM.fused ? " fused-attn" : "") : "plain JS";
   // Steady-state matters: attention cost scales with how full the ring is, so a
   // 2048-token run is legitimately slower per token than a 600-token one. Report

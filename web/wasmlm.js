@@ -9,6 +9,26 @@
 // together they are a low single-digit percentage of the work.
 // ---------------------------------------------------------------------------
 
+/**
+ * Try each kernel URL in order and keep the first that instantiates.
+ *
+ * kernel_relaxed.wasm uses relaxed-SIMD f32x4_relaxed_madd, which halves the
+ * instruction count in every dot product. Not every browser enables relaxed
+ * SIMD, and a module using it fails to instantiate where it is unsupported --
+ * hence the ordered fallback rather than a feature test.
+ */
+export async function loadBestKernel(urls, heap) {
+  const errors = [];
+  for (const url of urls) {
+    try {
+      return { ...(await loadKernel(url, heap)), url };
+    } catch (e) {
+      errors.push(`${url.split("/").pop()}: ${e.message}`);
+    }
+  }
+  throw new Error("no kernel loaded -- " + errors.join(" | "));
+}
+
 export async function loadKernel(url, heap) {
   const res = await fetch(url);
   if (!res.ok) throw new Error(`kernel fetch ${res.status}`);
