@@ -236,6 +236,18 @@ const fmt = n => n.toLocaleString("en-US");
 
 let MODEL, LM, JSLM, WLM, TOK, HEAP, KNAME = "", running = false, stopFlag = false;
 
+// Yield to the browser WITHOUT waiting for an animation frame.
+//
+// `await requestAnimationFrame` blocks until the next repaint (~16.7 ms), which
+// capped generation at the display refresh rate -- 1045 tok/s became 483.
+// setTimeout(0) is clamped to 4 ms once nested. MessageChannel posts a macrotask
+// with neither penalty: the browser gets a chance to paint, and generation
+// resumes immediately after.
+const _chan = new MessageChannel();
+let _yieldResolve = null;
+_chan.port1.onmessage = () => { const r = _yieldResolve; _yieldResolve = null; if (r) r(); };
+const yieldToBrowser = () => new Promise(r => { _yieldResolve = r; _chan.port2.postMessage(0); });
+
 // deterministic RNG so a given seed reproduces a given story
 function mulberry(a) {
   return () => { a |= 0; a = a + 0x6D2B79F5 | 0;
@@ -388,7 +400,8 @@ async function generate() {
   let count = 0, steadyCount = 0, steadyMs = 0, steadyT0 = 0;
   let pending = "";
   const t0 = performance.now();
-  const frame = () => new Promise(r => requestAnimationFrame(r));
+  let lastPaint = t0;
+  const PAINT_MS = 16;             // ~60 paints/sec, ~3% throughput cost
 
   for (let i = 0; i < n && !stopFlag; i++) {
     if (alpha > 0) {
@@ -407,17 +420,20 @@ async function generate() {
     count++;
     pending += (next === eot) ? SEP : TOK.decode([next]);
 
-    // one paint per animation frame -- ~17 tokens at 1000 tok/s, which reads as
-    // a stream rather than the lurch of a 40 ms interval
-    if (pending.length && (i % 4 === 3 || i === n - 1)) {
+    // Paint on a time budget. At ~1000 tok/s that is ~16 tokens per paint, which
+    // reads as a stream, and the cost is one MessageChannel hop rather than a
+    // frame wait -- so throughput stays where it was.
+    const now = performance.now();
+    if (pending.length && (now - lastPaint >= PAINT_MS || i === n - 1)) {
       el.insertBefore(document.createTextNode(pending), cur);
       pending = "";
       el.scrollTop = el.scrollHeight;                 // pin to the bottom
-      const secs = (performance.now() - t0) / 1000;
+      const secs = (now - t0) / 1000;
       const tps = count / secs;
       live.textContent = `${count} tokens · ${tps.toFixed(0)} tok/s · ${secs.toFixed(1)}s`;
       $("sTps").textContent = tps.toFixed(0);
-      await frame();
+      lastPaint = now;
+      await yieldToBrowser();
     }
 
     if (steadyT0 === 0 && LM.contextUsed >= LM.cap) steadyT0 = performance.now();
