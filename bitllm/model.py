@@ -150,11 +150,26 @@ class LM(nn.Module):
     Same class, same code path. The only variable is how weights are quantized.
     """
     def __init__(self, vocab=4096, d=320, n_layer=8, n_head=8, mult=4,
-                 weight_mode="ternary", act_bits=8, base=10000.0, maxT=1024):
+                 weight_mode="ternary", act_bits=8, base=10000.0, maxT=1024,
+                 embed_mode="none"):
+        """embed_mode quantizes the tied embedding/LM-head table in the forward
+        pass, with an STE, exactly as BitLinear does for the body. BitNet keeps
+        this at bf16 throughout, so anything other than "none" is beyond the
+        paper.
+
+        Default "none" preserves prior behaviour and checkpoint compatibility.
+
+        MEASURED post-hoc (PTQ) on a trained fp32 table, cost in nats:
+          int8 +0.0006   int4 +0.1861   ternary +0.5596
+        The embedding is more precision-sensitive PER PARAMETER than the body
+        (int4 on 1.3M embedding weights costs more than ternarizing 9.8M body
+        weights), which is the measured reason it is normally excluded.
+        """
         super().__init__()
         self.vocab, self.weight_mode = vocab, weight_mode
+        self.embed_mode = embed_mode
 
-        self.embed = nn.Embedding(vocab, d)          # fp32, never quantized
+        self.embed = nn.Embedding(vocab, d)
         nn.init.normal_(self.embed.weight, std=0.02)
 
         self.blocks = nn.ModuleList(
@@ -177,11 +192,21 @@ class LM(nn.Module):
                 b.o.weight.mul_(sc)
                 b.down.weight.mul_(sc)
 
+    def embed_weight(self):
+        """The (optionally quantized) embedding table. Because head.weight IS
+        embed.weight, one quantization covers the input lookup AND the output
+        projection -- so this must be computed once and used for both."""
+        w = self.embed.weight
+        if self.embed_mode != "none":
+            w = ste(w, quantize_weight(w, self.embed_mode))
+        return w
+
     def forward(self, idx, targets=None):
-        x = self.embed(idx)
+        W = self.embed_weight()
+        x = F.embedding(idx, W)
         for b in self.blocks:
             x = b(x, self.cos, self.sin)
-        logits = self.head(self.final_norm(x))
+        logits = F.linear(self.final_norm(x), W)
         loss = None
         if targets is not None:
             loss = F.cross_entropy(logits.reshape(-1, self.vocab),
@@ -199,7 +224,9 @@ class LM(nn.Module):
                    if isinstance(m, BitLinear) and m.is_quantized)
         total = sum(p.numel() for p in
                     {id(p): p for p in self.parameters()}.values())
-        return dict(total=total, quantized=tern, full_precision=total - tern)
+        emb = self.embed.weight.numel() if self.embed_mode != "none" else 0
+        return dict(total=total, quantized=tern, full_precision=total - tern,
+                    embed_quantized=emb, embed_mode=self.embed_mode)
 
     @torch.no_grad()
     def generate(self, idx, max_new=160, temperature=0.8, top_k=100, maxT=256):
@@ -217,5 +244,10 @@ class LM(nn.Module):
         return idx
 
 
-def fp32_model(**kw):   return LM(weight_mode="none", act_bits=0, **kw)
+def fp32_model(**kw):    return LM(weight_mode="none", act_bits=0, **kw)
 def ternary_model(**kw): return LM(weight_mode="ternary", act_bits=8, **kw)
+
+def ternary_embed_model(embed_mode="ternary", **kw):
+    """Ternary body AND a quantized embedding table, both trained through the
+    STE. Beyond BitNet, which keeps embeddings at bf16."""
+    return LM(weight_mode="ternary", act_bits=8, embed_mode=embed_mode, **kw)
