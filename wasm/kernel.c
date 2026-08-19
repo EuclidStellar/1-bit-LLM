@@ -19,6 +19,17 @@
 
 #define EXPORT(name) __attribute__((export_name(name)))
 
+// Rounding without libm. Built with -nostdlib, so __builtin_roundf emits a call
+// to roundf that never resolves. WASM has f32x4.nearest as a real instruction,
+// so splat-round-extract costs nothing and links cleanly.
+//
+// f32x4.nearest is roundTiesToEven -- which is what torch.round does. JavaScript
+// Math.round is ties-away-from-zero, so this path actually matches PyTorch more
+// closely than the pure-JS implementation it replaces.
+static inline float nearest_f32(float v) {
+  return wasm_f32x4_extract_lane(wasm_f32x4_nearest(wasm_f32x4_splat(v)), 0);
+}
+
 // y[o] = sum_i x[i] * W[o*inF + i]
 //
 // Four independent v128 accumulators: 16 floats per iteration. The four chains
@@ -64,6 +75,7 @@ void rmsnorm(const float *x, const float *w, float *out, int n, float eps) {
            + wasm_f32x4_extract_lane(sv, 2) + wasm_f32x4_extract_lane(sv, 3);
   for (; i < n; ++i) ss += x[i] * x[i];
 
+  // f32.sqrt is a WASM instruction, so this needs no libm either
   float inv = 1.0f / __builtin_sqrtf(ss / (float)n + eps);
   v128_t iv = wasm_f32x4_splat(inv);
   i = 0;
@@ -79,23 +91,32 @@ void rmsnorm(const float *x, const float *w, float *out, int n, float eps) {
 EXPORT("act_quant")
 void act_quant(const float *x, float *out, int n) {
   const float qmax = 127.0f;
+
   v128_t m = wasm_f32x4_splat(0.0f);
   int i = 0;
   for (; i + 4 <= n; i += 4)
     m = wasm_f32x4_max(m, wasm_f32x4_abs(wasm_v128_load(x + i)));
   float amax = wasm_f32x4_extract_lane(m, 0);
-  for (int l = 1; l < 4; ++l) {
-    float v = l == 1 ? wasm_f32x4_extract_lane(m, 1)
-            : l == 2 ? wasm_f32x4_extract_lane(m, 2)
-                     : wasm_f32x4_extract_lane(m, 3);
-    if (v > amax) amax = v;
-  }
+  float m1 = wasm_f32x4_extract_lane(m, 1);
+  float m2 = wasm_f32x4_extract_lane(m, 2);
+  float m3 = wasm_f32x4_extract_lane(m, 3);
+  if (m1 > amax) amax = m1;
+  if (m2 > amax) amax = m2;
+  if (m3 > amax) amax = m3;
   for (; i < n; ++i) { float a = x[i] < 0 ? -x[i] : x[i]; if (a > amax) amax = a; }
 
   float s = amax > 1e-5f ? amax : 1e-5f;
   float k = qmax / s, invk = s / qmax;
-  for (i = 0; i < n; ++i) {
-    float q = __builtin_roundf(x[i] * k);
+  v128_t kv = wasm_f32x4_splat(k), iv = wasm_f32x4_splat(invk);
+  v128_t hi = wasm_f32x4_splat(qmax), lo = wasm_f32x4_splat(-qmax);
+  i = 0;
+  for (; i + 4 <= n; i += 4) {
+    v128_t q = wasm_f32x4_nearest(wasm_f32x4_mul(wasm_v128_load(x + i), kv));
+    q = wasm_f32x4_pmin(hi, wasm_f32x4_pmax(lo, q));
+    wasm_v128_store(out + i, wasm_f32x4_mul(q, iv));
+  }
+  for (; i < n; ++i) {
+    float q = nearest_f32(x[i] * k);
     if (q > qmax) q = qmax; else if (q < -qmax) q = -qmax;
     out[i] = q * invk;
   }
