@@ -1,0 +1,1576 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>1-bit llm</title>
+<meta name="description" content="An 11M-parameter language model where every weight is -1, 0 or +1. 2.31 MB, runs entirely in your browser, ~1000 tokens a second, no server.">
+<meta property="og:title" content="1-bit llm">
+<meta property="og:description" content="2.31 MB. Every weight is -1, 0 or +1. Runs in your browser at ~1000 tokens a second. Extremely dumb, on purpose.">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Ctext y='25' font-size='26'%3E%E2%97%A7%3C/text%3E%3C/svg%3E">
+<style>
+  :root{
+    --bg:#f5f1e8; --panel:#fbf8f2; --ink:#1a1a1a; --muted:#737063;
+    --faint:#a8a398; --line:#ddd6c4; --accent:#b5533c; --accent-soft:#e9d9c9;
+    --mono:"iA Writer Mono","JetBrains Mono","Berkeley Mono","SF Mono",ui-monospace,Menlo,monospace;
+  }
+  @media (prefers-color-scheme:dark){:root{
+    --bg:#14130f; --panel:#1a1815; --ink:#e8e4da; --muted:#9a9488;
+    --faint:#6b665c; --line:#2e2b25; --accent:#d97a5e; --accent-soft:#33281f;
+  }}
+  *{box-sizing:border-box}
+  html{-webkit-text-size-adjust:100%}
+  body{margin:0;background:var(--bg);color:var(--ink);font-family:var(--mono);
+       font-size:14px;line-height:1.7;-webkit-font-smoothing:antialiased}
+  .wrap{max-width:680px;margin:0 auto;padding:56px 22px 72px}
+  a{color:var(--ink);text-decoration:underline;text-decoration-color:var(--line);
+    text-underline-offset:3px}
+  a:hover{color:var(--accent);text-decoration-color:var(--accent)}
+  h1{font-size:19px;font-weight:600;margin:0 0 8px;letter-spacing:-0.01em}
+  h1 .tilde{color:var(--accent);margin-right:8px}
+  .sub{color:var(--muted);margin:0 0 34px;font-size:13px;max-width:52ch}
+  p{margin:0 0 12px}
+  .muted{color:var(--muted)} .small{font-size:12.5px}
+
+  /* hero: speed is the product, so it is the biggest thing on the page */
+  .hero{border-top:1px solid var(--line);border-bottom:1px solid var(--line);
+        padding:26px 0 22px;margin:0 0 4px;text-align:center}
+  .hero .n{font-size:56px;line-height:1;font-weight:600;color:var(--accent);
+           font-variant-numeric:tabular-nums;letter-spacing:-0.03em}
+  .hero .u{font-size:11px;color:var(--faint);letter-spacing:0.14em;
+           text-transform:uppercase;margin-top:8px}
+  .facts{display:flex;flex-wrap:wrap;gap:6px 18px;justify-content:center;
+         font-size:11.5px;color:var(--muted);padding:12px 0 0}
+  .facts b{color:var(--ink);font-weight:600}
+  .bar{height:2px;background:var(--line);margin:14px 0 0}
+  .bar>i{display:block;height:100%;width:0;background:var(--accent);transition:width .12s}
+  #status{font-size:11.5px;color:var(--muted);margin:10px 0 0;min-height:1.5em;
+          word-break:break-word}
+  #status.ok{color:var(--ink)} #status.bad{color:var(--accent)}
+
+  label{display:block;font-size:11px;color:var(--faint);letter-spacing:0.06em;
+        margin:0 0 5px;text-transform:uppercase}
+  textarea,input[type=number],select{width:100%;font-family:var(--mono);
+    font-size:13px;background:var(--panel);color:var(--ink);
+    border:1px solid var(--line);border-radius:0;padding:8px 10px}
+  textarea{resize:vertical;min-height:52px;line-height:1.6}
+  select:focus,textarea:focus,input:focus{outline:none;border-color:var(--accent)}
+  input[type=range]{width:100%;accent-color:var(--accent)}
+  .row{display:grid;grid-template-columns:repeat(auto-fit,minmax(128px,1fr));
+       gap:14px;margin:0 0 14px}
+  .go-row{display:grid;grid-template-columns:1fr auto auto;gap:10px;
+          align-items:end;margin:16px 0 0}
+  button{font-family:var(--mono);font-size:13px;cursor:pointer;
+    background:transparent;color:var(--ink);border:1px solid var(--ink);
+    border-radius:0;padding:9px 18px;transition:all 90ms ease}
+  button:hover:not(:disabled){border-color:var(--accent);color:var(--accent)}
+  button:disabled{opacity:.3;cursor:not-allowed}
+  button.primary{background:var(--ink);color:var(--bg);border-color:var(--ink)}
+  button.primary:hover:not(:disabled){background:var(--accent);border-color:var(--accent);color:#fff}
+
+  #live{font-size:11.5px;color:var(--accent);margin:26px 0 6px;min-height:1.3em;
+        font-variant-numeric:tabular-nums;letter-spacing:0.02em}
+  #out{white-space:pre-wrap;height:320px;overflow-y:auto;font-size:13.5px;
+       line-height:1.8;border:1px solid var(--line);padding:16px 18px;
+       background:var(--panel);margin:0;scrollbar-width:thin}
+  #out::-webkit-scrollbar{width:7px}
+  #out::-webkit-scrollbar-thumb{background:var(--line)}
+  #out .cursor{display:inline-block;width:.5em;height:1em;background:var(--accent);
+               vertical-align:-.14em;animation:bl 1s step-end infinite}
+  @keyframes bl{50%{opacity:0}}
+  @media (prefers-reduced-motion:reduce){#out .cursor{animation:none}}
+
+  details{border-top:1px solid var(--line);padding:15px 0 4px;margin:0}
+  details>summary{cursor:pointer;font-size:12.5px;color:var(--muted);
+    list-style:none;display:flex;align-items:center;gap:9px;
+    padding:0;user-select:none}
+  details>summary::-webkit-details-marker{display:none}
+  details>summary::before{content:"+";color:var(--accent);font-size:14px;
+    width:9px;display:inline-block}
+  details[open]>summary::before{content:"\2212"}
+  details>summary:hover{color:var(--ink)}
+  .body{padding:16px 0 8px}
+
+  pre.grid{font-family:var(--mono);font-size:8px;line-height:1.2;letter-spacing:.4px;
+    color:var(--muted);overflow-x:auto;border:1px solid var(--line);padding:11px;
+    margin:11px 0 0;background:var(--panel)}
+  table{border-collapse:collapse;width:100%;font-size:12px;margin:10px 0 0}
+  th{text-align:left;font-weight:500;color:var(--faint);font-size:10.5px;
+     letter-spacing:.06em;text-transform:uppercase;padding:5px 10px 5px 0;
+     border-bottom:1px solid var(--line)}
+  td{padding:5px 10px 5px 0;border-bottom:1px solid var(--line);color:var(--muted)}
+  td.n{font-variant-numeric:tabular-nums;color:var(--ink)}
+  code{background:var(--accent-soft);padding:0 3px;font-size:.92em}
+  @media (max-width:560px){
+    .wrap{padding:38px 16px 56px}
+    .go-row{grid-template-columns:1fr;gap:14px}
+    .go-row>div:last-child{display:grid;grid-template-columns:1fr 1fr}
+    .hero .n{font-size:44px}
+    #out{height:260px}
+  }
+  footer{border-top:1px solid var(--line);margin:34px 0 0;padding:16px 0 0;
+         font-size:12px;color:var(--faint);display:flex;flex-wrap:wrap;gap:16px}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <h1><span class="tilde">~</span>1-bit llm</h1>
+  <p class="sub">
+    A language model where every single weight is &minus;1, 0 or +1 &mdash;
+    nothing in between. The whole thing is 2.31&nbsp;MB and it runs entirely in
+    this tab. No server, no API key, nothing leaves your machine.
+  </p>
+
+  <div class="hero">
+    <div class="n" id="sTps">&mdash;</div>
+    <div class="u">tokens per second</div>
+    <div class="facts">
+      <span><b id="sSize">&mdash;</b> on disk</span>
+      <span><b id="sParams">&mdash;</b> parameters</span>
+      <span><b id="sTern">&mdash;</b> of them ternary</span>
+    </div>
+    <div class="bar"><i id="bar"></i></div>
+    <p id="status">fetching weights&hellip;</p>
+  </div>
+
+  <div class="go-row">
+    <div>
+      <label for="prompt">prompt</label>
+      <textarea id="prompt">Once upon a time</textarea>
+    </div>
+    <div>
+      <label for="nnew">length</label>
+      <select id="nnew">
+        <option value="128">128</option>
+        <option value="256">256</option>
+        <option value="600" selected>600</option>
+        <option value="1200">1200</option>
+        <option value="2048">2048</option>
+        <option value="4096">4096</option>
+      </select>
+    </div>
+    <div style="display:flex;gap:8px">
+      <button id="go" class="primary" disabled>generate</button>
+      <button id="stop" disabled>stop</button>
+    </div>
+  </div>
+
+  <div id="live"></div>
+  <div id="out"></div>
+
+  <p class="small muted" style="margin-top:12px">
+    It forgets who its characters are after a few sentences. Names change
+    mid-story, a rabbit may fly. That is not the 1-bit part &mdash; the
+    full-precision version does it too. It read about eleven times less text than
+    it needed, deliberately, because the point was measuring what ternary weights
+    cost, not building something good.
+  </p>
+
+  <details>
+    <summary>tweak it</summary>
+    <div class="body">
+      <div class="row">
+        <div><label for="temp">temperature <span id="vTemp">0.80</span></label>
+          <input type="range" id="temp" min="0.1" max="1.5" step="0.05" value="0.8"></div>
+        <div><label for="topk">top-k <span id="vTopk">100</span></label>
+          <input type="range" id="topk" min="0" max="400" step="10" value="100"></div>
+        <div><label for="freq">repetition penalty <span id="vFreq">0.6</span></label>
+          <input type="range" id="freq" min="0" max="2" step="0.1" value="0.6"></div>
+        <div><label for="seed">seed</label>
+          <input type="number" id="seed" value="0"></div>
+        <div><label for="single">story mode</label>
+          <select id="single">
+            <option value="1" selected>one long story</option>
+            <option value="0">let it start new ones</option>
+          </select></div>
+        <div><label for="ngram">block repeated</label>
+          <select id="ngram">
+            <option value="0">off</option>
+            <option value="3" selected>3-grams</option>
+            <option value="4">4-grams</option>
+            <option value="5">5-grams</option>
+          </select></div>
+        <div><label for="engine">engine</label>
+          <select id="engine"><option value="js">JavaScript</option></select></div>
+      </div>
+      <p class="small muted">
+        Switch the engine to <code>JavaScript (reference)</code> to feel what it was like
+        before the inner loops moved into WebAssembly &mdash; roughly ten times
+        slower, same output.
+      </p>
+      <button id="prof" disabled>profile it</button>
+      <div id="proftab" style="margin-top:12px"></div>
+    </div>
+  </details>
+
+  <details>
+    <summary>look at the weights</summary>
+    <div class="body">
+      <p class="small muted">
+        Three possible values means a weight matrix prints as a picture.
+        <code>-</code> is &minus;1, <code>&middot;</code> is zero (no connection),
+        <code>+</code> is +1. Not many models let you read their parameters with
+        your eyes. About 31% come out as zero, which falls out of the maths rather
+        than being chosen.
+      </p>
+      <div class="row">
+        <div><label for="layer">layer</label><select id="layer"></select></div>
+        <div><label for="rows">rows <span id="vRows">26</span></label>
+          <input type="range" id="rows" min="8" max="60" step="2" value="26"></div>
+        <div><label for="cols">columns <span id="vCols">100</span></label>
+          <input type="range" id="cols" min="20" max="200" step="10" value="100"></div>
+      </div>
+      <button id="look" disabled>show</button>
+      <div id="wstats"></div>
+      <pre class="grid" id="wgrid"></pre>
+    </div>
+  </details>
+
+  <details>
+    <summary>how does 1-bit even work</summary>
+    <div class="body small">
+      <p>
+        A model is a giant pile of numbers. Normally each is stored as a precise
+        decimal like <code>0.8371942</code>, and producing one word means
+        multiplying your input by millions of them and adding up the results.
+      </p>
+      <p>
+        Multiplying is the expensive part. Try <code>47 &times; 89</code> in your
+        head, then <code>47 + 89</code> &mdash; chips feel the same way, and a
+        multiplier circuit costs ten to twenty times what an adder does.
+      </p>
+      <p>
+        So: what if every weight could only be &minus;1, 0 or +1? Then multiply
+        by +1 means <em>add it</em>, by &minus;1 means <em>subtract it</em>, and
+        by 0 means <em>skip it</em>. The multiplication disappears. Every hard
+        operation becomes an easy one. Three values is really about 1.58 bits, but
+        the name stuck.
+      </p>
+      <p>
+        Training such a thing has an obvious problem: you cannot nudge a number
+        that is only allowed to be one of three values. The trick is two copies.
+        Behind every &minus;1/0/+1 sits a hidden precise number that nothing ever
+        computes with &mdash; all the tiny training nudges go into that, and the
+        visible weight is whichever of the three it is nearest. Most nudges change
+        nothing. Then one tips it over a boundary and the weight flips. A light
+        switch with a dimmer behind it.
+      </p>
+      <p class="muted">
+        This one has 11,159,360 parameters. It read twenty million tokens of
+        children's stories — about fifteen million words — and trained in
+        roughly fifteen minutes on a free graphics card.
+      </p>
+    </div>
+  </details>
+
+  <footer>
+    <a href="https://github.com/EuclidStellar/1-bit-LLM">code &amp; notes</a>
+    <a href="https://huggingface.co/euclidstellar/tinystories-1bit-llm">weights</a>
+    <a href="https://arxiv.org/abs/2504.12285">the paper this follows</a>
+  </footer>
+</div>
+
+<script type="module">
+// ===== heap.js =======================================================
+// ---------------------------------------------------------------------------
+// heap.js -- one linear memory shared by the WASM kernel and the JS fallback.
+//
+// The whole point: weights, the KV cache and every scratch buffer live in a
+// single WebAssembly.Memory. The WASM kernel reads them as raw pointers and the
+// JS engine reads the same bytes through Float32Array views. Nothing is copied
+// per call, and both engines are provably looking at identical data -- which is
+// what makes verifying one against the other meaningful.
+// ---------------------------------------------------------------------------
+
+const PAGE = 65536;                       // WASM page size, 64 KB
+
+class Heap {
+  /** @param {number} floats how many f32 slots to reserve */
+  constructor(floats) {
+    const pages = Math.ceil((floats * 4) / PAGE) + 24;    // slack for the stack
+    this.memory = new WebAssembly.Memory({ initial: pages });
+    this.f32 = new Float32Array(this.memory.buffer);
+    this.cap = this.f32.length;
+    this.pages = pages;
+    // Start well above 0: wasm-ld places the module's shadow stack low in
+    // linear memory, and allocating from 0 would let JS scribble over it.
+    // Raised to the real value once the module reports __heap_base.
+    this.top = 1 << 18;                                   // 256 K floats = 1 MB
+  }
+
+  /** Move the allocation floor above whatever the WASM module reserves. */
+  setBase(heapBaseBytes) {
+    if (typeof heapBaseBytes === "number" && heapBaseBytes > 0) {
+      const floors = Math.ceil(heapBaseBytes / 4) + 4096;  // 16 KB of padding
+      if (floors > this.top) this.top = floors;
+    }
+    this.top = (this.top + 3) & ~3;
+  }
+
+  alloc(n) {
+    const off = this.top;
+    let t = off + n;
+    t = (t + 3) & ~3;                     // keep 16-byte alignment for SIMD
+    if (t > this.cap)
+      throw new Error(`heap overflow: need ${t} floats, have ${this.cap}`);
+    this.top = t;
+    return off;
+  }
+
+  /** Allocate n bytes (for int8 weight states), returned as a byte offset. */
+  allocBytes(n) {
+    const floats = Math.ceil(n / 4);
+    return this.alloc(floats) * 4;
+  }
+
+  /** An Int8Array view over the same memory. */
+  i8(byteOff, n) { return new Int8Array(this.memory.buffer, byteOff, n); }
+
+  /** A Float32Array view -- shares bytes with WASM, no copy. */
+  view(off, n) { return this.f32.subarray(off, off + n); }
+
+  /** Byte pointer, for passing to WASM. */
+  ptr(off) { return off * 4; }
+
+  get usedMB() { return (this.top * 4) / 1e6; }
+  get totalMB() { return (this.cap * 4) / 1e6; }
+}
+
+/** Floats needed for a given model shape, so the heap is sized exactly once. */
+function heapFloatsFor({ vocab = 4096, d = 320, nLayer = 8, mult = 4,
+                                cap = 256 } = {}) {
+  const ffn = d * mult;
+  const weights = vocab * d                          // embedding, tied with head
+                + nLayer * (4 * d * d + 2 * d * ffn) // q,k,v,o,up,down
+                + nLayer * (3 * d + ffn) + d;        // norms
+  const kv = nLayer * 2 * cap * d;
+  const scratch = 7 * d + 3 * ffn + vocab + cap + 4096;
+  // ternary states stored as int8 alongside the dense f32 copy: a quarter of the
+  // f32 footprint, and what the SIMD kernel actually reads
+  const ternary = vocab * d + nLayer * (4 * d * d + 2 * d * ffn);
+  return weights + kv + scratch + Math.ceil(ternary / 4) + 4096;
+}
+
+
+// ===== bitllm.js =====================================================
+// ---------------------------------------------------------------------------
+// bitllm.js -- an 11M-parameter BitNet b1.58 model, in the browser, in plain JS.
+//
+// Reads model_packed.bin directly: base-3 packed ternary weights, five per byte.
+// Verified logit-by-logit against the PyTorch reference before it is trusted.
+// ---------------------------------------------------------------------------
+
+const MAGIC = "BITNET1\0";
+
+// ---------- base-3 unpacking ------------------------------------------------
+// Inverse of the Python packer: digit 0 is least significant, five per byte.
+function unpackBase3(bytes, n) {
+  const out = new Int8Array(n);
+  let k = 0;
+  for (let i = 0; i < bytes.length && k < n; i++) {
+    let b = bytes[i];
+    for (let d = 0; d < 5 && k < n; d++) {
+      const r = b % 3;
+      out[k++] = r - 1;          // {0,1,2} -> {-1,0,+1}
+      b = (b - r) / 3;
+    }
+  }
+  return out;
+}
+
+// ---------- model file ------------------------------------------------------
+/**
+ * @param heap  optional Heap. If given, every tensor is written into the shared
+ *              linear memory and `offsets` maps names to float offsets, so the
+ *              WASM kernel and the JS engine read the exact same bytes.
+ */
+async function loadModel(url, onProgress, heap = null) {
+  const res = await fetch(url);
+  if (!res.ok) throw new Error(`fetch ${res.status} ${res.statusText}`);
+
+  const total = +res.headers.get("content-length") || 0;
+  const chunks = [];
+  let got = 0;
+  const reader = res.body.getReader();
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    chunks.push(value);
+    got += value.length;
+    if (onProgress) onProgress(got, total);
+  }
+  const buf = new Uint8Array(got);
+  let off = 0;
+  for (const c of chunks) { buf.set(c, off); off += c.length; }
+
+  const magic = new TextDecoder().decode(buf.subarray(0, 8));
+  if (magic !== MAGIC) throw new Error(`bad magic ${JSON.stringify(magic)}`);
+  const headerLen = new DataView(buf.buffer, 8, 4).getUint32(0, true);
+  const header = JSON.parse(new TextDecoder().decode(buf.subarray(12, 12 + headerLen)));
+  const blobStart = 12 + headerLen;
+
+  const T = {}, offsets = {}, i8offsets = {};
+  const place = (name, n) => {
+    if (!heap) return new Float32Array(n);
+    const off = heap.alloc(n);
+    offsets[name] = off;
+    return heap.view(off, n);
+  };
+
+  for (const t of header.tensors) {
+    const raw = buf.subarray(blobStart + t.offset, blobStart + t.offset + t.nbytes);
+    if (t.kind === "ternary") {
+      const states = unpackBase3(raw, t.n);
+      const data = place(t.name, t.n);
+      const sc = t.scale;
+      for (let i = 0; i < t.n; i++) data[i] = states[i] * sc;
+      if (heap) {
+        // the int8 states themselves: what the SIMD kernel reads, a quarter of
+        // the bytes of the dense f32 copy
+        const bo = heap.allocBytes(t.n);
+        heap.i8(bo, t.n).set(states);
+        i8offsets[t.name] = bo;
+      }
+      T[t.name] = { data, shape: t.shape, states, scale: sc };
+    } else {
+      // aligned copy: subarray offsets are not guaranteed 4-byte aligned
+      const copy = new Uint8Array(raw.length);
+      copy.set(raw);
+      const src = t.kind === "fp32"
+        ? new Float32Array(copy.buffer)
+        : Float32Array.from(new Uint16Array(copy.buffer), fp16ToFp32);
+      const data = place(t.name, src.length);
+      if (data !== src) data.set(src);
+      T[t.name] = { data, shape: t.shape };
+    }
+  }
+  T["head.weight"] = T["embed.weight"];                  // tied
+  offsets["head.weight"] = offsets["embed.weight"];
+  i8offsets["head.weight"] = i8offsets["embed.weight"];
+  return { tensors: T, offsets, i8offsets, header, bytes: got };
+}
+
+function fp16ToFp32(h) {
+  const s = (h & 0x8000) ? -1 : 1, e = (h >> 10) & 0x1f, f = h & 0x3ff;
+  if (e === 0) return s * Math.pow(2, -24) * f;
+  if (e === 31) return f ? NaN : s * Infinity;
+  return s * Math.pow(2, e - 25) * (1024 + f);
+}
+
+// ---------- primitives ------------------------------------------------------
+
+// RMSNorm, as PyTorch computes it: no mean subtraction, no bias.
+function rmsnorm(x, w, out, n, eps = 1e-6) {
+  let ss = 0;
+  for (let i = 0; i < n; i++) ss += x[i] * x[i];
+  const inv = 1 / Math.sqrt(ss / n + eps);
+  for (let i = 0; i < n; i++) out[i] = x[i] * inv * w[i];
+}
+
+// Per-token absmax int8 activation quantization -- BitNet's A8. Must match
+// PyTorch exactly: this is a step function, so being slightly off flips whole
+// quantization levels rather than nudging a value.
+function actQuant(x, out, n, bits = 8) {
+  const qmax = (1 << (bits - 1)) - 1;             // 127
+  let amax = 0;
+  for (let i = 0; i < n; i++) { const a = x[i] < 0 ? -x[i] : x[i]; if (a > amax) amax = a; }
+  const s = amax > 1e-5 ? amax : 1e-5;
+  const k = qmax / s, inv = s / qmax;
+  for (let i = 0; i < n; i++) {
+    let q = Math.round(x[i] * k);
+    if (q > qmax) q = qmax; else if (q < -qmax) q = -qmax;
+    out[i] = q * inv;
+  }
+}
+
+// Reference implementation: literal add / subtract / skip, no multiplication by
+// any weight. Correct, and SLOW in JavaScript -- with 31% zeros and ~34.5% each
+// of +/-1 the branch is unpredictable, so the CPU mispredicts on roughly two
+// thirds of 11M iterations per token. Kept because it is the honest expression
+// of what ternary weights mean; deliberately not in the hot path.
+function ternaryMatmulReference(x, states, scale, outF, inF, y) {
+  for (let o = 0; o < outF; o++) {
+    const base = o * inF;
+    let acc = 0;
+    for (let i = 0; i < inF; i++) {
+      const st = states[base + i];
+      if (st === 1) acc += x[i];
+      else if (st === -1) acc -= x[i];
+    }
+    y[o] = acc * scale;
+  }
+  return y;
+}
+
+// Eight independent accumulators. A single `acc` serializes on the floating-point
+// add's latency; eight let the pipeline overlap them, which is worth more than
+// the instruction count suggests.
+function dot8(x, W, base, inF) {
+  let a0 = 0, a1 = 0, a2 = 0, a3 = 0, a4 = 0, a5 = 0, a6 = 0, a7 = 0, i = 0;
+  const lim = inF - 7;
+  for (; i < lim; i += 8) {
+    const b = base + i;
+    a0 += x[i]     * W[b];
+    a1 += x[i + 1] * W[b + 1];
+    a2 += x[i + 2] * W[b + 2];
+    a3 += x[i + 3] * W[b + 3];
+    a4 += x[i + 4] * W[b + 4];
+    a5 += x[i + 5] * W[b + 5];
+    a6 += x[i + 6] * W[b + 6];
+    a7 += x[i + 7] * W[b + 7];
+  }
+  let acc = (a0 + a1) + (a2 + a3) + ((a4 + a5) + (a6 + a7));
+  for (; i < inF; i++) acc += x[i] * W[base + i];
+  return acc;
+}
+
+// Hot path: the pre-scaled Float32Array of states*scale, dense and branchless.
+// Numerically identical to the reference above, several times faster.
+function denseMatmul(x, W, outF, inF, y) {
+  for (let o = 0; o < outF; o++) y[o] = dot8(x, W, o * inF, inF);
+}
+
+// ---------- the model -------------------------------------------------------
+class BitLM {
+  constructor(model, cfg) {
+    this.T = model.tensors;
+    const c = model.header.inference_config || model.header.config || {};
+    this.vocab = c.vocab ?? 4096;
+    this.d = c.d ?? 320;
+    this.nLayer = c.n_layer ?? 8;
+    this.nHead = c.n_head ?? 8;
+    this.mult = c.mult ?? 4;
+    this.actBits = c.act_bits ?? 8;
+    this.cap = cfg?.cap ?? 256;              // trained context = attention window
+    this.hd = this.d / this.nHead;
+    this.ffn = this.d * this.mult;
+    const half = this.hd / 2;
+
+    // RoPE inverse frequencies. Angles are computed per position on the fly --
+    // 40 trig calls per token is nothing against 11M MACs -- because absolute
+    // position now grows without bound (see the ring buffer note in forward()).
+    this.invFreq = new Float32Array(half);
+    for (let i = 0; i < half; i++) this.invFreq[i] = 1 / Math.pow(10000, i / half);
+    this.rc = new Float32Array(half);
+    this.rs = new Float32Array(half);
+
+    // KV cache as a RING BUFFER of `cap` slots.
+    //
+    // RoPE attention scores depend only on the RELATIVE offset (t - p), never on
+    // absolute position. So absolute position may grow to 4,000+ freely, as long
+    // as we only attend to the last `cap` tokens -- because then every offset is
+    // in 0..cap-1, exactly the range the model was trained on. No re-prefill, no
+    // re-rotation of cached keys, no memmove.
+    this.kc = [];
+    this.vc = [];
+    for (let l = 0; l < this.nLayer; l++) {
+      this.kc.push(new Float32Array(this.cap * this.d));
+      this.vc.push(new Float32Array(this.cap * this.d));
+    }
+
+    const D = this.d;
+    this.x = new Float32Array(D);
+    this.h = new Float32Array(D);
+    this.q = new Float32Array(D);
+    this.k = new Float32Array(D);
+    this.v = new Float32Array(D);
+    this.att = new Float32Array(D);
+    this.y = new Float32Array(D);
+    this.u = new Float32Array(this.ffn);
+    this.un = new Float32Array(this.ffn);
+    this.scores = new Float32Array(this.cap);
+    this.logits = new Float32Array(this.vocab);
+
+    // Two pre-allocated quantization buffers. Calling subarray() per BitLinear
+    // allocated a fresh view 48 times per token -- pure GC pressure.
+    this.qD = new Float32Array(D);
+    this.qF = new Float32Array(this.ffn);
+
+    this.pos = 0;          // absolute position of the next token
+    this.nCached = 0;      // valid ring slots
+  }
+
+  reset() { this.pos = 0; this.nCached = 0; }
+
+  get contextUsed() { return this.nCached; }
+
+  macsPerToken() {
+    return this.nLayer * (4 * this.d * this.d + 2 * this.d * this.ffn)
+         + this.d * this.vocab;
+  }
+
+  _bit(name, x, outF, inF, y) {
+    const buf = inF === this.d ? this.qD : this.qF;
+    actQuant(x, buf, inF, this.actBits);
+    denseMatmul(buf, this.T[name].data, outF, inF, y);
+  }
+
+  _rope(vec, p) {
+    const half = this.hd / 2, H = this.nHead, hd = this.hd;
+    for (let i = 0; i < half; i++) {
+      const th = p * this.invFreq[i];
+      this.rc[i] = Math.cos(th);
+      this.rs[i] = Math.sin(th);
+    }
+    for (let hh = 0; hh < H; hh++) {
+      const b = hh * hd;
+      for (let i = 0; i < half; i++) {
+        const c = this.rc[i], s = this.rs[i];
+        const a = vec[b + i], d = vec[b + half + i];
+        vec[b + i] = a * c - d * s;
+        vec[b + half + i] = d * c + a * s;
+      }
+    }
+  }
+
+  /** One token in, logits out. Advances the ring by one position. */
+  forward(tokenId) {
+    const D = this.d, H = this.nHead, hd = this.hd, ffn = this.ffn, T = this.T;
+    const p = this.pos;
+    const slot = p % this.cap;
+
+    const E = T["embed.weight"].data;
+    const eoff = tokenId * D;
+    for (let i = 0; i < D; i++) this.x[i] = E[eoff + i];
+
+    for (let l = 0; l < this.nLayer; l++) {
+      const P = "blocks." + l + ".";
+
+      rmsnorm(this.x, T[P + "attn_norm.weight"].data, this.h, D);
+      this._bit(P + "q.weight", this.h, D, D, this.q);
+      this._bit(P + "k.weight", this.h, D, D, this.k);
+      this._bit(P + "v.weight", this.h, D, D, this.v);
+      this._rope(this.q, p);
+      this._rope(this.k, p);                 // rotated at its ABSOLUTE position
+      this.kc[l].set(this.k, slot * D);
+      this.vc[l].set(this.v, slot * D);
+
+      const nc = Math.min(p + 1, this.cap);
+      const scale = 1 / Math.sqrt(hd);
+      const kc = this.kc[l], vc = this.vc[l];
+      for (let hh = 0; hh < H; hh++) {
+        const qo = hh * hd;
+        let mx = -Infinity;
+        for (let t = 0; t < nc; t++) {
+          const ko = t * D + qo;
+          let sc = 0;
+          for (let i = 0; i < hd; i++) sc += this.q[qo + i] * kc[ko + i];
+          sc *= scale;
+          this.scores[t] = sc;
+          if (sc > mx) mx = sc;
+        }
+        let sum = 0;
+        for (let t = 0; t < nc; t++) {
+          const e = Math.exp(this.scores[t] - mx);
+          this.scores[t] = e; sum += e;
+        }
+        const inv = 1 / sum;
+        for (let i = 0; i < hd; i++) this.att[qo + i] = 0;
+        for (let t = 0; t < nc; t++) {
+          const w = this.scores[t] * inv, vo = t * D + qo;
+          for (let i = 0; i < hd; i++) this.att[qo + i] += w * vc[vo + i];
+        }
+      }
+
+      rmsnorm(this.att, T[P + "subln.weight"].data, this.y, D);      // SubLN
+      this._bit(P + "o.weight", this.y, D, D, this.att);
+      for (let i = 0; i < D; i++) this.x[i] += this.att[i];          // residual
+
+      rmsnorm(this.x, T[P + "ffn_norm.weight"].data, this.h, D);
+      this._bit(P + "up.weight", this.h, ffn, D, this.u);
+      for (let i = 0; i < ffn; i++) { const r = this.u[i] > 0 ? this.u[i] : 0; this.u[i] = r * r; }
+      rmsnorm(this.u, T[P + "ffn_subln.weight"].data, this.un, ffn);
+      this._bit(P + "down.weight", this.un, D, ffn, this.y);
+      for (let i = 0; i < D; i++) this.x[i] += this.y[i];            // residual
+    }
+
+    rmsnorm(this.x, T["final_norm.weight"].data, this.h, D);
+    // tied head is a plain nn.Linear in PyTorch, so NO activation quantization
+    denseMatmul(this.h, T["head.weight"].data, this.vocab, D, this.logits);
+    this.pos++;
+    this.nCached = Math.min(this.pos, this.cap);
+    return this.logits;
+  }
+}
+
+// ---------- sampling ---------------------------------------------------------
+//
+// PROFILED: forward() costs 0.870 ms/token (1,149 tok/s) while generation ran at
+// 535 tok/s -- roughly 1 ms per token was being burned here, not in the model.
+// The culprit was a full comparison sort of 4096 logits (~49,000 comparator
+// closure calls) to select the top 100, plus a Map rebuilt every token for the
+// frequency penalty and string keys for n-gram blocking.
+//
+// Everything below is allocation-free after construction and touches each logit
+// a constant number of times.
+// ---------------------------------------------------------------------------
+
+let _hv = new Float32Array(512);      // min-heap of the best k values
+let _hi = new Int32Array(512);
+
+function siftDown(i, n) {
+  for (;;) {
+    const l = 2 * i + 1, r = l + 1;
+    let m = i;
+    if (l < n && _hv[l] < _hv[m]) m = l;
+    if (r < n && _hv[r] < _hv[m]) m = r;
+    if (m === i) return;
+    const tv = _hv[i]; _hv[i] = _hv[m]; _hv[m] = tv;
+    const ti = _hi[i]; _hi[i] = _hi[m]; _hi[m] = ti;
+    i = m;
+  }
+}
+
+/**
+ * Top-k by min-heap: one pass, and an O(log k) sift only when a value beats the
+ * current k-th best. ~4096 comparisons plus a few hundred sifts, against ~49,000
+ * comparator calls for a full sort. Results land in _hi[0..k).
+ */
+function selectTopK(logits, k) {
+  if (k > _hv.length) { _hv = new Float32Array(k); _hi = new Int32Array(k); }
+  const n = logits.length;
+  let size = 0;
+  for (let i = 0; i < n; i++) {
+    const v = logits[i];
+    if (size < k) {
+      _hv[size] = v; _hi[size] = i; size++;
+      if (size === k) for (let j = (k >> 1) - 1; j >= 0; j--) siftDown(j, k);
+    } else if (v > _hv[0]) {
+      _hv[0] = v; _hi[0] = i; siftDown(0, k);
+    }
+  }
+  return size;
+}
+
+/**
+ * Repetition control with O(1) updates.
+ *
+ * Frequency penalty keeps a running count over a sliding window instead of
+ * rebuilding a Map each token. N-gram blocking keys on integers rather than
+ * joined strings.
+ */
+class Sampler {
+  constructor(vocab = 4096, { window = 128, ngram = 3 } = {}) {
+    this.vocab = vocab;
+    this.window = window;
+    this.counts = new Int32Array(vocab);      // occurrences inside the window
+    this.ring = new Int32Array(window);
+    this.n = 0;
+    this.ngram = ngram;
+    this.seen = new Map();                    // integer key -> Set of next tokens
+    this.hist = [];
+  }
+
+  push(tok) {
+    const w = this.window;
+    if (this.n >= w) this.counts[this.ring[this.n % w]]--;
+    this.ring[this.n % w] = tok;
+    this.counts[tok]++;
+    this.n++;
+
+    this.hist.push(tok);
+    const g = this.ngram;
+    if (g > 1 && this.hist.length >= g) {
+      const k = this._key(this.hist.length - g, g - 1);
+      let set = this.seen.get(k);
+      if (!set) { set = new Set(); this.seen.set(k, set); }
+      set.add(tok);
+    }
+  }
+
+  _key(from, len) {
+    let k = 0;
+    for (let i = 0; i < len; i++) k = k * this.vocab + this.hist[from + i];
+    return k;
+  }
+
+  /** Tokens that would complete an already-seen n-gram. */
+  bannedNext() {
+    const g = this.ngram;
+    if (g < 2 || this.hist.length < g - 1) return null;
+    return this.seen.get(this._key(this.hist.length - (g - 1), g - 1)) || null;
+  }
+
+  /** logits -= alpha * (count within the window). One pass over the window. */
+  applyFrequency(logits, alpha) {
+    if (alpha <= 0) return;
+    const w = Math.min(this.n, this.window);
+    for (let i = 0; i < w; i++) {
+      const t = this.ring[i];
+      logits[t] -= alpha * this.counts[t] / Math.max(this.counts[t], 1) * this.counts[t];
+    }
+  }
+}
+
+function sample(logits, temperature = 0.8, topK = 100, rng = Math.random,
+                       banned = null) {
+  const n = logits.length;
+  if (banned) for (const b of banned) logits[b] = -Infinity;
+
+  if (temperature <= 0) {
+    let bi = 0;
+    for (let i = 1; i < n; i++) if (logits[i] > logits[bi]) bi = i;
+    return bi;
+  }
+
+  const k = (topK > 0 && topK < n) ? topK : n;
+  let size, idxArr;
+  if (k === n) {
+    size = n; idxArr = null;                   // no selection needed
+  } else {
+    size = selectTopK(logits, k); idxArr = _hi;
+  }
+
+  let mx = -Infinity;
+  for (let j = 0; j < size; j++) {
+    const v = logits[idxArr ? idxArr[j] : j];
+    if (v > mx) mx = v;
+  }
+  const inv = 1 / temperature;
+  let sum = 0;
+  for (let j = 0; j < size; j++) {
+    const v = logits[idxArr ? idxArr[j] : j];
+    sum += Math.exp((v - mx) * inv);
+  }
+  let r = rng() * sum, acc = 0;
+  for (let j = 0; j < size; j++) {
+    const i = idxArr ? idxArr[j] : j;
+    acc += Math.exp((logits[i] - mx) * inv);
+    if (acc >= r) return i;
+  }
+  return idxArr ? idxArr[size - 1] : size - 1;
+}
+
+
+// ===== tokenizer.js ==================================================
+// ---------------------------------------------------------------------------
+// tokenizer.js -- byte-level BPE, encode and decode, from tokenizer.json.
+//
+// The page has to tokenize the user's prompt, so decode alone is not enough.
+// This replicates HF tokenizers' ByteLevel(add_prefix_space=false) + BPE.
+// ---------------------------------------------------------------------------
+
+// GPT-2 byte<->unicode table. Bytes that are not printable ASCII get mapped
+// into the 256+ range so every byte becomes exactly one BMP character.
+// Byte 32 (space) lands on U+0120, which is the "G with dot above" glyph you
+// see all over the vocabulary.
+function byteMaps() {
+  const bs = [];
+  for (let i = 33; i <= 126; i++) bs.push(i);
+  for (let i = 161; i <= 172; i++) bs.push(i);
+  for (let i = 174; i <= 255; i++) bs.push(i);
+  const cs = bs.slice();
+  let n = 0;
+  for (let b = 0; b < 256; b++) {
+    if (!bs.includes(b)) { bs.push(b); cs.push(256 + n); n++; }
+  }
+  const b2u = new Array(256), u2b = new Map();
+  for (let i = 0; i < bs.length; i++) {
+    const ch = String.fromCharCode(cs[i]);
+    b2u[bs[i]] = ch;
+    u2b.set(ch, bs[i]);
+  }
+  return { b2u, u2b };
+}
+
+// GPT-2's pre-tokenization pattern. ByteLevel applies this before byte-encoding,
+// which is why " the" is one piece and a line-initial "the" is another.
+const SPLIT = /'s|'t|'re|'ve|'m|'ll|'d| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+/gu;
+
+const EOT = "<|endoftext|>";
+
+class Tokenizer {
+  constructor(json) {
+    this.vocab = json.model.vocab;                       // token string -> id
+    this.ids = new Array(Object.keys(this.vocab).length);
+    for (const [t, i] of Object.entries(this.vocab)) this.ids[i] = t;
+
+    // merge rank table: "a b" -> priority (lower rank applies first)
+    this.ranks = new Map();
+    json.model.merges.forEach((m, i) => {
+      const [a, b] = Array.isArray(m) ? m : m.split(" ");
+      this.ranks.set(a + " " + b, i);
+    });
+
+    const { b2u, u2b } = byteMaps();
+    this.b2u = b2u;
+    this.u2b = u2b;
+    this.enc = new TextEncoder();
+    this.dec = new TextDecoder("utf-8", { fatal: false });
+    this.cache = new Map();
+  }
+
+  get size() { return this.ids.length; }
+
+  // Greedy BPE: repeatedly merge the adjacent pair with the lowest rank.
+  // This is the same algorithm that produced the merge table during training.
+  _bpe(piece) {
+    if (this.cache.has(piece)) return this.cache.get(piece);
+    const parts = Array.from(piece);
+    for (;;) {
+      let best = Infinity, bi = -1;
+      for (let i = 0; i < parts.length - 1; i++) {
+        const r = this.ranks.get(parts[i] + " " + parts[i + 1]);
+        if (r !== undefined && r < best) { best = r; bi = i; }
+      }
+      if (bi < 0) break;
+      parts.splice(bi, 2, parts[bi] + parts[bi + 1]);
+    }
+    this.cache.set(piece, parts);
+    return parts;
+  }
+
+  encode(text) {
+    const out = [];
+    for (const m of text.matchAll(SPLIT)) {
+      let mapped = "";
+      for (const b of this.enc.encode(m[0])) mapped += this.b2u[b];
+      for (const tk of this._bpe(mapped)) {
+        const id = this.vocab[tk];
+        if (id !== undefined) {
+          out.push(id);
+        } else {
+          for (const ch of tk) {              // fall back to single bytes
+            const single = this.vocab[ch];
+            if (single !== undefined) out.push(single);
+          }
+        }
+      }
+    }
+    return out;
+  }
+
+  decode(ids, keepEot = false) {
+    let mapped = "";
+    for (const id of ids) {
+      const t = this.ids[id];
+      if (t === undefined) continue;
+      if (t === EOT) { if (keepEot) mapped += "\n"; continue; }
+      mapped += t;
+    }
+    const bytes = new Uint8Array(mapped.length * 2);
+    let n = 0;
+    for (const ch of mapped) {
+      const b = this.u2b.get(ch);
+      if (b !== undefined) bytes[n++] = b;
+    }
+    return this.dec.decode(bytes.subarray(0, n));
+  }
+
+  get eotId() {
+    const id = this.vocab[EOT];
+    return id === undefined ? -1 : id;
+  }
+}
+
+
+// ===== wasmlm.js =====================================================
+// ---------------------------------------------------------------------------
+// wasmlm.js -- the same forward pass, with the inner loops in SIMD128 WASM.
+//
+// Control flow is identical to bitllm.js (which is verified against PyTorch);
+// only the loops move. Both engines read the same Heap, so comparing their
+// logits is a real test rather than a coincidence of shared code.
+//
+// RoPE and softmax stay in JavaScript: RoPE needs trig, softmax needs exp, and
+// together they are a low single-digit percentage of the work.
+// ---------------------------------------------------------------------------
+
+/**
+ * Try each kernel URL in order and keep the first that instantiates.
+ *
+ * kernel_relaxed.wasm uses relaxed-SIMD f32x4_relaxed_madd, which halves the
+ * instruction count in every dot product. Not every browser enables relaxed
+ * SIMD, and a module using it fails to instantiate where it is unsupported --
+ * hence the ordered fallback rather than a feature test.
+ */
+async function loadBestKernel(urls, heap) {
+  const errors = [];
+  for (const url of urls) {
+    try {
+      return { ...(await loadKernel(url, heap)), url };
+    } catch (e) {
+      errors.push(`${url.split("/").pop()}: ${e.message}`);
+    }
+  }
+  throw new Error("no kernel loaded -- " + errors.join(" | "));
+}
+
+async function loadKernel(url, heap) {
+  const res = await fetch(url);
+  if (!res.ok) throw new Error(`kernel fetch ${res.status}`);
+  const bytes = await res.arrayBuffer();
+  const { instance } = await WebAssembly.instantiate(bytes,
+    { env: { memory: heap.memory } });
+
+  const need = ["matvec", "rmsnorm", "act_quant", "add_inplace",
+                "relu2", "gather_row"];
+  const missing = need.filter(n => typeof instance.exports[n] !== "function");
+  if (missing.length) throw new Error("kernel missing exports: " + missing);
+
+  // wasm-ld puts the module's shadow stack low in linear memory; move the JS
+  // allocator above it before anything is allocated.
+  const hb = instance.exports.__heap_base;
+  heap.setBase(typeof hb === "object" ? hb.value : hb);
+
+  return { K: instance.exports, size: bytes.byteLength,
+           caps: { i8: typeof instance.exports.matvec_i8 === "function",
+                   fusedAttn: typeof instance.exports.attn_head === "function" } };
+}
+
+class WasmBitLM {
+  /**
+   * @param model  result of loadModel(url, onProgress, heap) -- offsets, not arrays
+   * @param heap   the shared Heap
+   * @param K      kernel exports from loadKernel
+   */
+  constructor(model, heap, K, cfg) {
+    const c = model.header.inference_config || model.header.config || {};
+    this.heap = heap; this.K = K; this.O = model.offsets;
+    this.I = model.i8offsets || {};
+    this.SC = {};
+    for (const tt of model.header.tensors)
+      if (tt.kind === "ternary") this.SC[tt.name] = tt.scale;
+    this.SC["head.weight"] = this.SC["embed.weight"];
+    // int8 states are a quarter of the bytes of the dense f32 copy, and weight
+    // streaming is the bottleneck at this size
+    this.useI8 = typeof K.matvec_i8 === "function"
+              && Object.keys(this.I).length > 0;
+    this.fused = typeof K.attn_head === "function";
+    this.vocab = c.vocab ?? 4096;
+    this.d = c.d ?? 320;
+    this.nLayer = c.n_layer ?? 8;
+    this.nHead = c.n_head ?? 8;
+    this.mult = c.mult ?? 4;
+    this.cap = cfg?.cap ?? 256;
+    this.hd = this.d / this.nHead;
+    this.ffn = this.d * this.mult;
+    const D = this.d, F = this.ffn, half = this.hd / 2;
+
+    // RoPE frequencies. Angles are recomputed per position because absolute
+    // position grows without bound -- see the ring-buffer note in forward().
+    this.invFreq = new Float32Array(half);
+    for (let i = 0; i < half; i++) this.invFreq[i] = 1 / Math.pow(10000, i / half);
+    this.rc = new Float32Array(half);
+    this.rs = new Float32Array(half);
+
+    // everything below lives in the shared heap
+    const A = n => heap.alloc(n);
+    this.oX = A(D); this.oH = A(D); this.oQ = A(D); this.oK = A(D);
+    this.oV = A(D); this.oAtt = A(D); this.oY = A(D);
+    this.oU = A(F); this.oUn = A(F);
+    this.oQD = A(D); this.oQF = A(F);
+    this.oLog = A(this.vocab); this.oSc = A(this.cap);
+
+    this.oKC = []; this.oVC = [];
+    for (let l = 0; l < this.nLayer; l++) {
+      this.oKC.push(A(this.cap * D));
+      this.oVC.push(A(this.cap * D));
+    }
+
+    this.f32 = heap.f32;
+    this.vQ = heap.view(this.oQ, D);        // RoPE works on views
+    this.vK = heap.view(this.oK, D);
+    this.vSc = heap.view(this.oSc, this.cap);
+    this.logits = heap.view(this.oLog, this.vocab);
+
+    this.pos = 0;
+    this.nCached = 0;
+  }
+
+  reset() { this.pos = 0; this.nCached = 0; }
+  get contextUsed() { return this.nCached; }
+
+  macsPerToken() {
+    return this.nLayer * (4 * this.d * this.d + 2 * this.d * this.ffn)
+         + this.d * this.vocab;
+  }
+
+  /** RoPE angles depend only on the position, which is fixed for the whole
+   *  token -- so compute them once per forward, not once per layer. */
+  _ropeTables(p) {
+    const half = this.hd / 2;
+    for (let i = 0; i < half; i++) {
+      const th = p * this.invFreq[i];
+      this.rc[i] = Math.cos(th);
+      this.rs[i] = Math.sin(th);
+    }
+  }
+
+  _rope(vec) {
+    const half = this.hd / 2, H = this.nHead, hd = this.hd;
+    for (let hh = 0; hh < H; hh++) {
+      const b = hh * hd;
+      for (let i = 0; i < half; i++) {
+        const c = this.rc[i], s = this.rs[i];
+        const a = vec[b + i], d = vec[b + half + i];
+        vec[b + i] = a * c - d * s;
+        vec[b + half + i] = d * c + a * s;
+      }
+    }
+  }
+
+  /** One matvec, from int8 states when the kernel supports it. */
+  _mv(name, srcOff, dstOff, outF, inF) {
+    if (this.useI8)
+      this.K.matvec_i8(srcOff * 4, this.I[name], dstOff * 4, outF, inF,
+                       this.SC[name]);
+    else
+      this.K.matvec(srcOff * 4, this.O[name] * 4, dstOff * 4, outF, inF);
+  }
+
+  forward(tokenId) {
+    const K = this.K, O = this.O, P = o => o * 4;
+    const D = this.d, H = this.nHead, hd = this.hd, F = this.ffn;
+    const p = this.pos, slot = p % this.cap;
+
+    if (this.useI8 && typeof K.gather_row_i8 === "function")
+      K.gather_row_i8(this.I["embed.weight"], P(this.oX), tokenId, D,
+                      this.SC["embed.weight"]);
+    else
+      K.gather_row(P(O["embed.weight"]), P(this.oX), tokenId, D);
+    this._ropeTables(p);
+    const hasFused = this.fused;
+
+    for (let l = 0; l < this.nLayer; l++) {
+      const B = "blocks." + l + ".";
+
+      K.rmsnorm(P(this.oX), P(O[B + "attn_norm.weight"]), P(this.oH), D, 1e-6);
+
+      K.act_quant(P(this.oH), P(this.oQD), D);
+      this._mv(B + "q.weight", this.oQD, this.oQ, D, D);
+      this._mv(B + "k.weight", this.oQD, this.oK, D, D);
+      this._mv(B + "v.weight", this.oQD, this.oV, D, D);
+
+      this._rope(this.vQ);
+      this._rope(this.vK);                 // rotated at its ABSOLUTE position
+      this.f32.copyWithin(this.oKC[l] + slot * D, this.oK, this.oK + D);
+      this.f32.copyWithin(this.oVC[l] + slot * D, this.oV, this.oV + D);
+
+      // Ring buffer: RoPE scores depend only on the relative offset (t - p), so
+      // absolute position may grow without bound as long as attention reaches
+      // back at most `cap` tokens -- every offset then stays in the trained range.
+      const nc = Math.min(p + 1, this.cap);
+      const scale = 1 / Math.sqrt(hd);
+      for (let hh = 0; hh < H; hh++) {
+        const qo = hh * hd;
+        if (hasFused) {
+          // scores + softmax + weighted sum in one call, no JS exp
+          K.attn_head(P(this.oQ), P(this.oKC[l]), P(this.oVC[l]), P(this.oAtt),
+                      P(this.oSc), nc, D, qo, hd, scale);
+        } else {
+          K.attn_scores(P(this.oQ), P(this.oKC[l]), P(this.oSc),
+                        nc, D, qo, hd, scale);
+          let mx = -Infinity;
+          for (let t = 0; t < nc; t++) if (this.vSc[t] > mx) mx = this.vSc[t];
+          let sum = 0;
+          for (let t = 0; t < nc; t++) {
+            const e = Math.exp(this.vSc[t] - mx);
+            this.vSc[t] = e; sum += e;
+          }
+          const inv = 1 / sum;
+          for (let t = 0; t < nc; t++) this.vSc[t] *= inv;
+          K.attn_mix(P(this.oSc), P(this.oVC[l]), P(this.oAtt), nc, D, qo, hd);
+        }
+      }
+
+      K.rmsnorm(P(this.oAtt), P(O[B + "subln.weight"]), P(this.oY), D, 1e-6);
+      K.act_quant(P(this.oY), P(this.oQD), D);
+      this._mv(B + "o.weight", this.oQD, this.oAtt, D, D);
+      K.add_inplace(P(this.oX), P(this.oAtt), D);
+
+      K.rmsnorm(P(this.oX), P(O[B + "ffn_norm.weight"]), P(this.oH), D, 1e-6);
+      K.act_quant(P(this.oH), P(this.oQD), D);
+      this._mv(B + "up.weight", this.oQD, this.oU, F, D);
+      K.relu2(P(this.oU), F);
+      K.rmsnorm(P(this.oU), P(O[B + "ffn_subln.weight"]), P(this.oUn), F, 1e-6);
+      K.act_quant(P(this.oUn), P(this.oQF), F);
+      this._mv(B + "down.weight", this.oQF, this.oY, D, F);
+      K.add_inplace(P(this.oX), P(this.oY), D);
+    }
+
+    K.rmsnorm(P(this.oX), P(O["final_norm.weight"]), P(this.oH), D, 1e-6);
+    // tied head is a plain nn.Linear in PyTorch: no activation quantization
+    this._mv("embed.weight", this.oH, this.oLog, this.vocab, D);
+
+    this.pos++;
+    this.nCached = Math.min(this.pos, this.cap);
+    return this.logits;
+  }
+}
+
+
+// ===== app ============================================================
+
+
+
+
+const HF = "https://huggingface.co/euclidstellar/tinystories-1bit-llm/resolve/main/";
+const DATA = "https://huggingface.co/datasets/euclidstellar/tinystories-bpe4096/resolve/main/";
+
+const $ = id => document.getElementById(id);
+const setStatus = (t, cls = "") => { $("status").textContent = t; $("status").className = "status " + cls; };
+const fmt = n => n.toLocaleString("en-US");
+
+let MODEL, LM, JSLM, WLM, TOK, HEAP, KNAME = "", running = false, stopFlag = false;
+
+// Yield to the browser WITHOUT waiting for an animation frame.
+//
+// `await requestAnimationFrame` blocks until the next repaint (~16.7 ms), which
+// capped generation at the display refresh rate -- 1045 tok/s became 483.
+// setTimeout(0) is clamped to 4 ms once nested. MessageChannel posts a macrotask
+// with neither penalty: the browser gets a chance to paint, and generation
+// resumes immediately after.
+const _chan = new MessageChannel();
+let _yieldResolve = null;
+_chan.port1.onmessage = () => { const r = _yieldResolve; _yieldResolve = null; if (r) r(); };
+const yieldToBrowser = () => new Promise(r => { _yieldResolve = r; _chan.port2.postMessage(0); });
+
+// deterministic RNG so a given seed reproduces a given story
+function mulberry(a) {
+  return () => { a |= 0; a = a + 0x6D2B79F5 | 0;
+    let t = Math.imul(a ^ a >>> 15, 1 | a);
+    t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t;
+    return ((t ^ t >>> 14) >>> 0) / 4294967296; };
+}
+
+for (const [r, out, f] of [["temp","vTemp",v=>(+v).toFixed(2)],
+                           ["freq","vFreq",v=>(+v).toFixed(1)],
+                           ["topk","vTopk",v=>v],["rows","vRows",v=>v],["cols","vCols",v=>v]])
+  $(r).addEventListener("input", e => $(out).textContent = f(e.target.value));
+
+async function boot() {
+  try {
+    // One linear memory shared by the WASM kernel and the JS engine. Both read
+    // the same bytes, so comparing their logits is a real test.
+    HEAP = new Heap(heapFloatsFor({}));
+
+    let K = null, kbytes = 0, kname = "";
+    try {
+      setStatus("loading SIMD kernel...");
+      // relaxed SIMD first: f32x4_relaxed_madd halves the dot-product
+      // instruction count where the browser supports it
+      const k = await loadBestKernel([HF + "kernel_relaxed.wasm",
+                                      HF + "kernel.wasm"], HEAP);
+      K = k.K; kbytes = k.size; kname = k.url.split("/").pop(); KNAME = kname;
+    } catch (e) {
+      console.warn("no WASM kernel:", e.message);
+      HEAP.setBase(0);                       // keep the JS-only floor
+    }
+
+    MODEL = await loadModel(HF + "model_packed.bin", (got, total) => {
+      const pct = total ? got / total * 100 : 0;
+      $("bar").style.width = pct + "%";
+      setStatus(`weights ${(got/1e6).toFixed(2)} MB`
+              + (total ? " / " + (total/1e6).toFixed(2) + " MB" : ""));
+    }, HEAP);
+
+    $("sSize").textContent = (MODEL.bytes / 1e6).toFixed(2) + " MB";
+    const c = MODEL.header.counts || {};
+    const tern = c.ternary_weights ?? 0, full = c.full_precision_weights ?? 0;
+    $("sParams").textContent = fmt(tern + full);
+    $("sTern").textContent = ((tern / (tern + full)) * 100).toFixed(2) + "%";
+
+    setStatus("loading tokenizer...");
+    TOK = new Tokenizer(await (await fetch(DATA + "tokenizer.json")).json());
+
+    JSLM = new BitLM(MODEL, { cap: 256 });
+    if (K) {
+      try {
+        WLM = new WasmBitLM(MODEL, HEAP, K, { cap: 256 });
+        $("engine").innerHTML =
+          '<option value="wasm" selected>WASM + SIMD128</option>'
+        + '<option value="js">JavaScript (reference)</option>';
+      } catch (e) { console.warn("WasmBitLM failed:", e.message); WLM = null; }
+    }
+    LM = WLM || JSLM;
+
+    // ---- verify: WASM against JS, then whichever against PyTorch ----------
+    const notes = [];
+    if (WLM) {
+      const probe = [438, 453, 259, 404, 408, 282, 259, 406];
+      JSLM.reset(); WLM.reset();
+      let a = null, b = null;
+      for (const id of probe) { a = JSLM.forward(id); b = WLM.forward(id); }
+      let mx = 0;
+      for (let i = 0; i < a.length; i++) mx = Math.max(mx, Math.abs(a[i] - b[i]));
+      let ja = 0, wb = 0;
+      for (let i = 1; i < a.length; i++) { if (a[i] > a[ja]) ja = i; if (b[i] > b[wb]) wb = i; }
+      notes.push(`wasm vs js: argmax ${ja === wb ? "agree" : "DISAGREE"}, `
+               + `max logit delta ${mx.toExponential(2)}`);
+      if (ja !== wb) { console.error("WASM disagrees with JS -- falling back"); LM = JSLM; }
+    }
+
+    try {
+      const ref = await (await fetch(HF + "reference.json")).json();
+      LM.reset();
+      const mine = [];
+      let last = null;
+      for (const id of ref.input_ids) {
+        last = LM.forward(id);
+        let bi = 0;
+        for (let i = 1; i < last.length; i++) if (last[i] > last[bi]) bi = i;
+        mine.push(bi);
+      }
+      const n = ref.argmax_per_pos.length;
+      let agree = 0;
+      for (let i = 0; i < n; i++) if (mine[i] === ref.argmax_per_pos[i]) agree++;
+      notes.push(`vs pytorch: argmax ${agree}/${n}`);
+      if (agree !== n) console.warn("ref", ref.argmax_per_pos, "ours", mine);
+      setStatus(notes.join(" | ") + ` | heap ${HEAP.usedMB.toFixed(1)}/`
+              + `${HEAP.totalMB.toFixed(0)} MB`
+              + (kbytes ? `, kernel ${(kbytes/1024).toFixed(1)} KB` : ""),
+              agree === n ? "ok" : "bad");
+    } catch (e) {
+      setStatus(notes.join(" | ") + " | reference not loaded", "");
+    }
+
+    const names = MODEL.header.tensors.filter(t => t.kind === "ternary").map(t => t.name);
+    $("layer").innerHTML = names.map(n => `<option>${n}</option>`).join("");
+    $("engine").addEventListener("change", e => {
+      LM = e.target.value === "wasm" && WLM ? WLM : JSLM;
+    });
+    $("go").disabled = false; $("look").disabled = false; $("prof").disabled = false;
+    $("bar").style.width = "100%";
+  } catch (e) {
+    setStatus("failed to load: " + e.message, "bad");
+    console.error(e);
+  }
+}
+
+async function generate() {
+  if (running) return;
+  running = true; stopFlag = false;
+  $("go").disabled = true; $("stop").disabled = false;
+
+  const prompt = $("prompt").value;
+  const n = +$("nnew").value, temp = +$("temp").value, topk = +$("topk").value;
+  const single = $("single").value === "1";
+  const rng = mulberry(+$("seed").value | 0);
+  const ids = TOK.encode(prompt);
+  const eot = TOK.eotId;
+
+  // In "one continuous story" mode the end-of-story token is banned outright.
+  // The model learned to emit it and then open a fresh story, which is why
+  // long generations used to come out as a pile of separate stories.
+  const banEot = (single && eot >= 0) ? [eot] : null;
+  const alpha = +$("freq").value;
+  const ngN = +$("ngram").value;
+  const SMP = new Sampler(4096, { window: 128, ngram: ngN > 0 ? ngN : 1 });
+  for (const id of ids) SMP.push(id);
+  const SEP = "\n\n\u00b7 \u00b7 \u00b7\n\n";
+
+  LM.reset();
+  let logits = null;
+  for (const id of ids) logits = LM.forward(id);
+
+  // Terminal-tail rendering: append text nodes and keep the box pinned to the
+  // bottom. Reassigning textContent re-rendered the entire string on every
+  // paint, which at 4096 tokens costs more than the model does.
+  const el = $("out");
+  el.textContent = "";
+  el.appendChild(document.createTextNode(prompt));
+  const cur = document.createElement("span");
+  cur.className = "cursor";
+  el.appendChild(cur);
+  const live = $("live");
+
+  let count = 0, steadyCount = 0, steadyMs = 0, steadyT0 = 0;
+  let pending = "";
+  const t0 = performance.now();
+  let lastPaint = t0;
+  const PAINT_MS = 16;             // ~60 paints/sec, ~3% throughput cost
+
+  for (let i = 0; i < n && !stopFlag; i++) {
+    if (alpha > 0) {
+      const w = Math.min(SMP.n, SMP.window);
+      for (let j = 0; j < w; j++) {
+        const tk = SMP.ring[j];
+        logits[tk] -= alpha * SMP.counts[tk];
+      }
+    }
+    if (banEot) logits[eot] = -Infinity;
+    const nb = ngN > 0 ? SMP.bannedNext() : null;
+    if (nb) for (const b of nb) logits[b] = -Infinity;
+
+    const next = sample(logits, temp, topk, rng, null);
+    SMP.push(next);
+    count++;
+    pending += (next === eot) ? SEP : TOK.decode([next]);
+
+    // Paint on a time budget. At ~1000 tok/s that is ~16 tokens per paint, which
+    // reads as a stream, and the cost is one MessageChannel hop rather than a
+    // frame wait -- so throughput stays where it was.
+    const now = performance.now();
+    if (pending.length && (now - lastPaint >= PAINT_MS || i === n - 1)) {
+      el.insertBefore(document.createTextNode(pending), cur);
+      pending = "";
+      el.scrollTop = el.scrollHeight;                 // pin to the bottom
+      const secs = (now - t0) / 1000;
+      const tps = count / secs;
+      live.textContent = `${count} tokens · ${tps.toFixed(0)} tok/s · ${secs.toFixed(1)}s`;
+      $("sTps").textContent = tps.toFixed(0);
+      lastPaint = now;
+      await yieldToBrowser();
+    }
+
+    if (steadyT0 === 0 && LM.contextUsed >= LM.cap) steadyT0 = performance.now();
+    logits = LM.forward(next);
+    if (steadyT0 > 0) { steadyCount++; steadyMs = performance.now() - steadyT0; }
+  }
+
+  if (pending.length) el.insertBefore(document.createTextNode(pending), cur);
+  cur.remove();
+  const dt = (performance.now() - t0) / 1000;
+  const tps = count / dt;
+  const engine = (LM === WLM) ? (KNAME.includes("relaxed") ? "WASM+relaxedSIMD"
+                                                            : "WASM+SIMD")
+                              + (LM.useI8 ? " int8" : " f32")
+                              + (LM.fused ? " fused-attn" : "") : "plain JS";
+  // Steady-state matters: attention cost scales with how full the ring is, so a
+  // 2048-token run is legitimately slower per token than a 600-token one. Report
+  // both or the numbers are not comparable between runs.
+  const steady = steadyCount > 0 ? steadyCount / (steadyMs / 1000) : tps;
+  setStatus(`${count} tokens in ${dt.toFixed(2)}s | avg ${tps.toFixed(0)} tok/s`
+          + ` | steady ${steady.toFixed(0)} tok/s (full 256 window)`
+          + ` = ${(steady * LM.macsPerToken() / 1e9).toFixed(2)} GMAC/s`
+          + ` | ${engine} | ctx ${LM.contextUsed}/${LM.cap}, pos ${LM.pos}`, "ok");
+  running = false; $("go").disabled = false; $("stop").disabled = true;
+}
+
+function look() {
+  const name = $("layer").value;
+  const t = MODEL.tensors[name];
+  const [outF, inF] = t.shape;
+  const s = t.states;
+  const r = Math.min(+$("rows").value, outF), c = Math.min(+$("cols").value, inF);
+  const G = { "-1": "-", "0": "·", "1": "+" };
+  let g = "";
+  for (let i = 0; i < r; i++) {
+    for (let j = 0; j < c; j++) g += G[String(s[i * inF + j])];
+    g += "\n";
+  }
+  $("wgrid").textContent = g;
+  let neg = 0, zero = 0, pos = 0;
+  for (let i = 0; i < s.length; i++) { const v = s[i]; if (v === 0) zero++; else if (v > 0) pos++; else neg++; }
+  const n = s.length, pc = x => (x / n * 100).toFixed(2) + "%";
+  $("wstats").innerHTML =
+    `<table><tr><th>${name}</th><th>weights</th><th>&minus;1</th><th>0</th><th>+1</th><th>scale</th></tr>`
+    + `<tr><td class="n">${outF} &times; ${inF}</td><td class="n">${fmt(n)}</td>`
+    + `<td class="n">${pc(neg)}</td><td class="n">${pc(zero)}</td><td class="n">${pc(pos)}</td>`
+    + `<td class="n">${t.scale.toExponential(3)}</td></tr></table>`
+    + `<p style="font-size:.85rem;color:var(--ink-soft);margin:.7rem 0 0">Showing the `
+    + `top-left ${r} &times; ${c} corner. For Gaussian weights the zero fraction is `
+    + `analytically 31.01% &mdash; training barely moves it.</p>`;
+}
+
+function profile() {
+  $("proftab").innerHTML = "<p><strong>profiling, a few seconds...</strong></p>";
+  setTimeout(profileRun, 30);
+}
+
+function profileRun() {
+  if (!WLM || !WLM.K) { $("proftab").innerHTML = "<p>WASM engine not active.</p>"; return; }
+  const K = WLM.K, L = WLM, D = L.d, F = L.ffn, V = L.vocab, hd = L.hd, cap = L.cap;
+  const P = o => o * 4;
+  const I = L.I, SC = L.SC, O = L.O;
+  const mv = (name, src, dst, outF, inF) => L.useI8
+      ? () => K.matvec_i8(P(src), I[name], P(dst), outF, inF, SC[name])
+      : () => K.matvec(P(src), P(O[name]), P(dst), outF, inF);
+
+  // warm the ring so attention sees a full window
+  L.reset();
+  for (let i = 0; i < cap; i++) L.forward(1 + (i % 100));
+
+  const bench = (fn, iters) => {
+    for (let i = 0; i < 20; i++) fn();
+    const t0 = performance.now();
+    for (let i = 0; i < iters; i++) fn();
+    return (performance.now() - t0) / iters;      // ms per call
+  };
+
+  const rows = [
+    ["matvec 320x320  (q,k,v,o)", mv("blocks.0.q.weight", L.oQD, L.oQ, D, D), 32, 32*D*D],
+    ["matvec 1280x320 (up)",      mv("blocks.0.up.weight", L.oQD, L.oU, F, D), 8, 8*F*D],
+    ["matvec 320x1280 (down)",    mv("blocks.0.down.weight", L.oQF, L.oY, D, F), 8, 8*D*F],
+    ["matvec 4096x320 (head)",    mv("embed.weight", L.oH, L.oLog, V, D), 1, V*D],
+    ["attn_head (per head)",
+      () => K.attn_head(P(L.oQ), P(L.oKC[0]), P(L.oVC[0]), P(L.oAtt), P(L.oSc),
+                        cap, D, 0, hd, 1/Math.sqrt(hd)), 64, 64*cap*hd*2],
+    ["rmsnorm 320",  () => K.rmsnorm(P(L.oX), P(O["final_norm.weight"]), P(L.oH), D, 1e-6), 25, 0],
+    ["act_quant 320", () => K.act_quant(P(L.oH), P(L.oQD), D), 24, 0],
+    ["act_quant 1280", () => K.act_quant(P(L.oU), P(L.oQF), F), 8, 0],
+    ["add_inplace 320", () => K.add_inplace(P(L.oX), P(L.oY), D), 16, 0],
+    ["relu2 1280", () => K.relu2(P(L.oU), F), 8, 0],
+    ["_rope (JS)", () => { L._ropeTables(7); L._rope(L.vQ); }, 16, 0],
+  ];
+
+  let html = '<table><tr><th>operation</th><th>ms/call</th><th>calls/token</th>'
+           + '<th>ms/token</th><th>share</th><th>GMAC/s</th></tr>';
+  const timed = rows.map(([label, fn, n, macs]) => {
+    const ms = bench(fn, Math.max(40, Math.round(60 / Math.max(n, 1)) * 20));
+    return { label, ms, n, macs, total: ms * n };
+  });
+  const sum = timed.reduce((a, r) => a + r.total, 0);
+
+  // measured end-to-end for comparison
+  L.reset();
+  for (let i = 0; i < 30; i++) L.forward(5);
+  const t0 = performance.now();
+  for (let i = 0; i < 120; i++) L.forward(5);
+  const realMs = (performance.now() - t0) / 120;
+
+  for (const r of timed)
+    html += `<tr><td>${r.label}</td><td class="n">${r.ms.toFixed(4)}</td>`
+          + `<td class="n">${r.n}</td><td class="n">${r.total.toFixed(3)}</td>`
+          + `<td class="n">${(r.total/sum*100).toFixed(1)}%</td>`
+          + `<td class="n">${r.macs ? (r.macs/r.total/1e6).toFixed(2) : "&mdash;"}</td></tr>`;
+  html += `<tr><td><strong>modelled total</strong></td><td class="n"></td><td class="n"></td>`
+        + `<td class="n"><strong>${sum.toFixed(3)}</strong></td><td class="n">100%</td>`
+        + `<td class="n">${(11141120/sum/1e6).toFixed(2)}</td></tr>`
+        + `<tr><td><strong>measured forward()</strong></td><td class="n"></td><td class="n"></td>`
+        + `<td class="n"><strong>${realMs.toFixed(3)}</strong></td>`
+        + `<td class="n">${(sum/realMs*100).toFixed(0)}% accounted</td>`
+        + `<td class="n">${(11141120/realMs/1e6).toFixed(2)}</td></tr></table>`
+        + `<p style="font-size:.85rem;color:var(--ink-soft);margin:.7rem 0 0">`
+        + `${(1000/realMs).toFixed(0)} tok/s implied. Anything unaccounted is JS call `
+        + `overhead, copyWithin, or sampling.</p>`;
+  $("proftab").innerHTML = "<h2>Where the time goes</h2>" + html;
+  $("proftab").scrollIntoView({ behavior: "smooth", block: "start" });
+  L.reset();
+}
+
+$("prof").addEventListener("click", profile);
+$("go").addEventListener("click", generate);
+$("stop").addEventListener("click", () => { stopFlag = true; });
+$("look").addEventListener("click", look);
+boot();
+
+// --- live readouts beside each slider ------------------------------------
+// The demo logic reads these inputs on demand; nothing there echoes the
+// current value back, so wire the labels here.
+for (const [id, fmt] of [["temp", v => (+v).toFixed(2)],
+                         ["topk", v => (+v === 0 ? "off" : v)],
+                         ["freq", v => (+v).toFixed(1)],
+                         ["rows", v => v],
+                         ["cols", v => v]]) {
+  const el = document.getElementById(id);
+  const out = document.getElementById("v" + id[0].toUpperCase() + id.slice(1));
+  if (!el || !out) continue;
+  const sync = () => { out.textContent = fmt(el.value); };
+  el.addEventListener("input", sync);
+  sync();
+}
+
+// Cmd/Ctrl+Enter from the prompt box starts a run.
+document.getElementById("prompt").addEventListener("keydown", e => {
+  if ((e.metaKey || e.ctrlKey) && e.key === "Enter") {
+    e.preventDefault();
+    const b = document.getElementById("go");
+    if (!b.disabled) b.click();
+  }
+});
+</script>
+</body>
+</html>

@@ -16,6 +16,10 @@ weights    https://huggingface.co/euclidstellar/tinystories-1bit-llm
 This repo is the whole journey, including the parts that were wrong. If you only
 read one file, read [`notes/mistakes.md`](notes/mistakes.md).
 
+**The whole thing written up as one post, in plain language** — what ternary
+weights cost, what they buy, and where I was wrong:
+[`blog/1-bit-llm-from-scratch.md`](blog/1-bit-llm-from-scratch.md)
+
 ---
 
 ## Results
