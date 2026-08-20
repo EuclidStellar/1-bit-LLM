@@ -93,6 +93,44 @@ what needs data. This ranks components **at this budget**, not in general.
 
 ---
 
+## Decoder-only — there is no encoder and no cross-attention
+
+A question that has come up, so: this is a **decoder-only** transformer, like GPT
+and LLaMA. `LM` in [`bitllm/model.py`](bitllm/model.py) is the whole model —
+embedding, eight identical blocks, final norm, tied head. There is no encoder
+stack, no decoder stack, and no cross-attention anywhere.
+
+The tell is in `Block.attn()`:
+
+```python
+q = self.q(x)     # Q from x
+k = self.k(x)     # K from x  <- the same x
+v = self.v(x)     # V from x  <- the same x
+y = F.scaled_dot_product_attention(q, k, v, is_causal=True)
+```
+
+Q, K and V all come from one tensor. That is self-attention. Cross-attention
+takes two inputs — Q from the decoder, K and V from the encoder's output — and it
+exists so a decoder can look at something an encoder produced. There is nothing
+here to look at: the task is next-token prediction over a single continuous
+stream. Translation needs cross-attention because the output sequence must attend
+to a different input sequence. Story continuation does not.
+
+`is_causal=True` does the work instead: position *t* may only see positions ≤ *t*.
+Remove that one flag and loss collapses toward zero, because the model is reading
+the answer.
+
+| family | attention | example |
+|---|---|---|
+| encoder-only | bidirectional self-attn, no mask | BERT |
+| encoder-decoder | self-attn + **cross-attention** | original Transformer, T5 |
+| **decoder-only** | causal self-attn only | GPT, LLaMA, BitNet, **this** |
+
+To read attention appearing from nothing, see
+[`notebooks/00_ladder_kaggle.py`](notebooks/00_ladder_kaggle.py) — rung 2 is the
+model *without* it, rung 3 adds it by hand, and the loss difference between them
+is 1.4722 nats.
+
 ## Architecture
 
 Follows the [BitNet b1.58 2B4T report](https://arxiv.org/abs/2504.12285):
