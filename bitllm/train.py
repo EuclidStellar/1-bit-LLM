@@ -1,4 +1,11 @@
 """
+Standalone CLI trainer.
+
+NOTE: this is NOT the code that produced the published results. Those came from
+notebooks/02_train_kaggle.py, run cell by cell on a Kaggle T4. This file is a
+more elaborate variant (argparse, checkpoint/resume, AMP) written first and never
+actually used -- it should work, but it is untested against the published numbers.
+
 Training loop for BitLM.
 
     python -m bitllm.train --data data/tinystories --out runs/fp32    --weight-mode none
